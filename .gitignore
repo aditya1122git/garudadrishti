@@ -1,0 +1,17 @@
+.env
+.env.local
+.env.*.local
+*.pyc
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+env/
+node_modules/
+dist/
+build/
+*.log
+.cache/
+tsconfig.tsbuildinfo
+.DS_Store
+Thumbs.db

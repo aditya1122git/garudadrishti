@@ -1,0 +1,50 @@
+services:
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    networks: [database]
+    healthcheck:
+      test: [CMD, mongosh, --quiet, --eval, "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  api:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017}
+      SEED_MOCK_DATA: ${SEED_MOCK_DATA:-true}
+      DEMO_IN_MEMORY: "false"
+      HF_CACHE_DIR: /home/app/.cache/huggingface
+    volumes:
+      - hf_cache:/home/app/.cache/huggingface
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks: [database, web]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      start_period: 90s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  frontend:
+    build: ./frontend
+    ports: ["127.0.0.1:8080:8080"]
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [web]
+networks:
+  database:
+    internal: true
+  web:
+volumes:
+  mongo_data:
+  hf_cache:
