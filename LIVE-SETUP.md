@@ -25,6 +25,25 @@ The default public multilingual model runs locally and needs **no Hugging Face A
 
 Configure the database, administrator and source credentials, then restart. Test the model with `python -m app.check_classifier` from `backend`, trigger Refresh, and inspect source/classifier health before enabling external notifications. For local Python execution use `mongodb://127.0.0.1:27017`; the default `mongodb://mongo:27017` hostname is for Docker Compose.
 
+## Hostinger Docker Compose deployment
+
+Hostinger clones the repository, so the ignored local `.env` file is not present on the server. Add these variables in the Hostinger project environment before deploying:
+
+- `JWT_SECRET` - an independent random value of at least 32 characters
+- `ENCRYPTION_KEY` - a Fernet key; keep this stable for the lifetime of the database
+- `BOOTSTRAP_EMAIL` and `BOOTSTRAP_PASSWORD` - required on the first deployment because the new Mongo volume has no users; password must be 14-72 UTF-8 bytes
+- `YOUTUBE_API_KEY`, `APIFY_API_TOKEN`, `GROQ_API_KEY`
+- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` when Telegram alerts are enabled
+
+Generate the two security values locally without printing application credentials:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+The Compose file explicitly forwards deployment environment variables to the API container. It also fails during Compose validation with a clear message when `JWT_SECRET` or `ENCRYPTION_KEY` is absent. After the first successful startup, the administrator remains in the persistent Mongo volume; `BOOTSTRAP_EMAIL` and `BOOTSTRAP_PASSWORD` can then be removed before a later redeploy.
+
 ## YouTube-only hybrid update
 
 `ENABLED_PLATFORMS=youtube` limits active ingestion to YouTube. Only video titles are classified; descriptions and comments are excluded. General and short-duration searches run across public channels, grouped to stay within quota; the first upgraded sync backfills `YOUTUBE_INITIAL_LOOKBACK_DAYS=7`. Configure `GROQ_API_KEY` in the private `.env` to enable fallback below `HF_CONFIDENCE_THRESHOLD=0.75`, then restart the API. The default current fallback is `qwen/qwen3.8-27b` and supports positive, negative, neutral, and mixed. Missing/invalid Groq credentials or model access leave those records pending, not silently finalized. `HF_TOKEN` is optional for the public model. See `MODEL-VALIDATION.md` for measured limitations.
