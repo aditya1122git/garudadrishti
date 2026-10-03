@@ -11,18 +11,84 @@ from .config import config
 
 class Result(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    sentiment: Literal['positive', 'negative', 'neutral']
+    sentiment: Literal['positive', 'negative', 'neutral', 'mixed']
     confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
     reason: str = Field(min_length=1, max_length=300)
+    model_used: str = ''
+    hf_confidence: float | None = None
+    pending: bool = False
+    review_required: bool = False
 
 
 def preprocess(text):
-    # Match the model card's social-text normalization without stripping Hindi.
+    """Improved preprocessing for political Hindi social-media text.
+
+    Strips hashtags (major noise: #viral #bankipur confuse political Hindi),
+    decodes HTML entities (&quot; etc), and normalizes short social text.
+    """
+    import html as _html
+    # Decode HTML entities (&quot; -> ", &amp; -> &, etc.)
+    text = _html.unescape(text)
+    # Replace URLs per model card
     text = re.sub(r'https?://\S+', 'http', text)
-    return re.sub(r'(?<!\w)@\w+', '@user', text)
+    # Anonymise @mentions per model card
+    text = re.sub(r'(?<!\w)@\w+', '@user', text)
+    # Strip hashtags entirely -- #word is keyword noise, not sentiment signal
+    text = re.sub(r'#\S+', '', text)
+    # Normalise whitespace (including zero-width Unicode chars)
+    text = re.sub(r'[\s\u200b\u200c\u200d\ufeff]+', ' ', text).strip()
+    # Deduplicate repeated title fragments separated by common punctuation.
+    segments = [s.strip() for s in re.split(r'[\n|!।]+', text) if s.strip()]
+    seen_segs: set = set()
+    unique = []
+    for seg in segments:
+        key = re.sub(r'\s+', '', seg.lower())
+        if key and key not in seen_segs:
+            seen_segs.add(key)
+            unique.append(seg)
+    text = ' '.join(unique)
+    # Cap at 400 chars -- enough context, avoids token truncation noise
+    return text[:400]
 
 
-def result_from_scores(labels, scores, truncated=False):
+
+# ---------------------------------------------------------------------------
+# Political-Hindi context override
+# The XLM-RoBERTa model was trained on general Twitter sentiment.
+# It misreads political victory language (भारी हैं = dominant/winning) as
+# negative and praise phrases as neutral.  These lightweight regex rules
+# correct low-confidence predictions where the model is likely wrong.
+# Rules fire ONLY when model confidence < 0.65 to avoid overriding clear signals.
+# ---------------------------------------------------------------------------
+_POSITIVE_SIGNALS = [
+    # Political dominance / winning
+    r'भारी\s+हैं', r'भारी\s+पड़', r'जीत', r'जीते', r'जीता', r'विजय',
+    r'तारीफ', r'सराहना', r'समर्थन', r'बधाई', r'शानदार', r'बेहतरीन',
+    r'अच्छ', r'achh', r'shukriy', r'badhiya', r'great', r'excellent',
+    r'proud', r'support', r'well done', r'congratul',
+    r'केंद्रीय मंत्री.*तारीफ', r'मंत्री.*प्रशंसा',
+    r'सटीक\s+बात',  # "sahi/accurate point" = positive
+]
+_NEGATIVE_SIGNALS = [
+    r'fraud', r'धोखा', r'बर्बाद', r'शर्म', r'जंगलराज', r'बेकार',
+    r'नाकाम', r'झूठ', r'proxy', r'corrupt', r'failure', r'flop',
+    r'निराश', r'गद्दार', r'विरोध.*तीखा', r'खतरनाक',
+]
+
+def _political_override(text_clean, label, confidence):
+    """Return corrected (label, confidence, note) for low-confidence predictions."""
+    if confidence >= 0.65:
+        return label, confidence, ''
+    text_lower = text_clean.lower()
+    pos_hit = any(re.search(p, text_lower) for p in _POSITIVE_SIGNALS)
+    neg_hit = any(re.search(p, text_lower) for p in _NEGATIVE_SIGNALS)
+    if pos_hit and not neg_hit and label != 'positive':
+        return 'positive', max(confidence, 0.58), ' Corrected by political-Hindi positive signal.'
+    if neg_hit and not pos_hit and label != 'negative':
+        return 'negative', max(confidence, 0.58), ' Corrected by political-Hindi negative signal.'
+    return label, confidence, ''
+
+def result_from_scores(labels, scores, truncated=False, raw_text=''):
     labels = [str(label).lower() for label in labels]
     if len(labels) != 3 or set(labels) != {'negative', 'neutral', 'positive'}:
         raise ValueError('Model must expose named negative, neutral and positive labels')
@@ -31,12 +97,19 @@ def result_from_scores(labels, scores, truncated=False):
     if abs(sum(scores) - 1) > .001:
         raise ValueError('Model probabilities must sum to one')
     index = max(range(3), key=lambda i: scores[i])
+    label, confidence = labels[index], scores[index]
+    # Apply political-Hindi context correction for low-confidence predictions
+    if raw_text:
+        label, confidence, override_note = _political_override(raw_text, label, confidence)
+    else:
+        override_note = ''
     note = 'Overall text sentiment; not target-specific stance.'
-    if scores[index] < .7:
+    if confidence < .7:
         note += ' Low model confidence; review.'
     if truncated:
         note += ' Long post truncated; review full text.'
-    return Result(sentiment=labels[index], confidence=scores[index], reason=note)
+    note += override_note
+    return Result(sentiment=label, confidence=confidence, reason=note[:300])
 
 
 class Classifier:
@@ -48,6 +121,7 @@ class Classifier:
         self._lock = threading.Lock()
         self.status = 'pending'
         self.error = None
+        self._groq = None
 
     @property
     def provenance(self):
@@ -91,8 +165,8 @@ class Classifier:
                     scores = self._model(**tokens).logits.softmax(dim=-1).cpu().tolist()
                 if len(scores) != len(batch):
                     raise ValueError('Classification array length mismatch')
-                results.extend(result_from_scores(self._labels, row, cut)
-                               for row, cut in zip(scores, truncated, strict=True))
+                results.extend(result_from_scores(self._labels, row, cut, bt)
+                               for row, cut, bt in zip(scores, truncated, batch, strict=True))
             return results
 
     async def classify(self, texts):
@@ -106,7 +180,29 @@ class Classifier:
             if len(results) != len(texts):
                 raise ValueError('Classification array length mismatch')
             results = [Result.model_validate(r) for r in results]
-            self.status = 'live'
+            for result in results:
+                result.model_used = self.provenance
+                result.hf_confidence = result.confidence
+            low = [i for i, result in enumerate(results)
+                   if result.confidence < self.settings.hf_confidence_threshold]
+            if low:
+                from .groq_fallback import GroqFallback
+                if self._groq is None:
+                    self._groq = GroqFallback(self.settings)
+                refined = await self._groq.classify([texts[i] for i in low])
+                for index, fallback in zip(low, refined, strict=True):
+                    if fallback is None:
+                        results[index].pending = True
+                        results[index].review_required = True
+                    else:
+                        fallback.model_used = 'groq/' + self.settings.groq_model
+                        fallback.hf_confidence = results[index].confidence
+                        fallback.review_required = fallback.confidence < self.settings.hf_confidence_threshold
+                        results[index] = fallback
+            self.status = 'partial' if any(r.pending for r in results) else 'live'
+            self.error = ((getattr(self._groq, 'last_error', None) or
+                           'Groq fallback unavailable; low-confidence posts remain pending.')
+                          if self.status == 'partial' else None)
             return results
         except Exception:
             self.status = 'unavailable'
@@ -122,6 +218,9 @@ def classifier():
 def classifier_status():
     c = config()
     engine = classifier()
-    return {'provider': 'Hugging Face (local)', 'status': 'demo' if c.seed_mock_data else engine.status,
+    status = 'demo' if c.seed_mock_data else ('ready' if engine.status == 'pending' else engine.status)
+    return {'provider': 'Hugging Face + Groq fallback', 'status': status,
             'model': c.hf_model, 'revision': c.hf_revision,
+            'threshold': c.hf_confidence_threshold, 'fallback_model': c.groq_model,
+            'fallback_configured': bool(c.groq_api_key),
             'error': None if c.seed_mock_data else engine.error}

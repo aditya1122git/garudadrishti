@@ -1,6 +1,6 @@
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
-import { faEye, faTableColumns, faTowerBroadcast, faGear, faDownload, faMagnifyingGlass, faArrowUpRightFromSquare, faTriangleExclamation, faChevronRight, faArrowsRotate, faRightFromBracket, faShieldHalved, faCalendarDays, faChartLine, faCheck, faXmark, faBell, faBars } from "@fortawesome/free-solid-svg-icons";
+import { faEye, faTableColumns, faTowerBroadcast, faGear, faDownload, faMagnifyingGlass, faArrowUpRightFromSquare, faTriangleExclamation, faChevronRight, faArrowsRotate, faRightFromBracket, faShieldHalved, faCalendarDays, faChartLine, faCheck, faXmark, faBell, faBars, faNewspaper } from "@fortawesome/free-solid-svg-icons";
 import { faFacebookF, faInstagram, faYoutube, faXTwitter } from "@fortawesome/free-brands-svg-icons";
 type Props = { size?: number; className?: string };
 function iconComponent(icon: IconDefinition) {
@@ -26,7 +26,7 @@ export const Check = iconComponent(faCheck);
 export const Close = iconComponent(faXmark);
 export const Bell = iconComponent(faBell);
 export const Menu = iconComponent(faBars);
-const platforms: Record<string, IconDefinition> = { facebook: faFacebookF, instagram: faInstagram, youtube: faYoutube, x: faXTwitter };
+const platforms: Record<string, IconDefinition> = { facebook: faFacebookF, instagram: faInstagram, youtube: faYoutube, x: faXTwitter, news: faNewspaper };
 export function PlatformIcon({ platform }: { platform: string }) {
   return <FontAwesomeIcon icon={platforms[platform] || faTowerBroadcast} aria-hidden="true" />;
 }

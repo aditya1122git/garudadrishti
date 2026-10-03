@@ -30,6 +30,7 @@ type Rollup = {
   positive_count: number;
   negative_count: number;
   neutral_count: number;
+  mixed_count: number;
   total_count: number;
   negativity_index: number;
 };
@@ -52,8 +53,9 @@ type Post = {
     confidence: number;
     reason: string;
     model_used: string;
+    review_required?: boolean;
   } | null;
-  demo: boolean;
+  classification_status?: string;
 };
 type Alert = {
   date: string;
@@ -65,7 +67,6 @@ type Alert = {
   notification_errors?: Record<string, string>;
 };
 type Overview = {
-  demo: boolean;
   date: string;
   timezone: string;
   sources: Source[];
@@ -75,7 +76,13 @@ type Overview = {
   pending: number;
   threshold: number;
   partial: boolean;
-  classifier: { status: string; model: string };
+  classifier: {
+    status: string;
+    model: string;
+    threshold?: number;
+    fallback_model?: string;
+    fallback_configured?: boolean;
+  };
   alerts: Alert[];
 };
 const names: Record<string, string> = {
@@ -83,8 +90,14 @@ const names: Record<string, string> = {
   instagram: "Instagram",
   x: "X / Twitter",
   youtube: "YouTube",
+  news: "News",
 };
-const colors = { positive: "#2f9278", negative: "#ce514e", neutral: "#a0adbb" };
+const colors = {
+  positive: "#2f9278",
+  negative: "#ce514e",
+  neutral: "#a0adbb",
+  mixed: "#c68732",
+};
 const num = (n: number) => n.toLocaleString("en-IN");
 const dateLabel = (d: string) =>
   new Date(d + "T12:00:00").toLocaleDateString("en-IN", {
@@ -122,17 +135,8 @@ function App() {
       role: string;
       email: string;
     } | null>(null),
-    [demo, setDemo] = useState(false),
     [error, setError] = useState(""),
     [loginBusy, setLoginBusy] = useState(false);
-  useEffect(() => {
-    fetch("/api/auth/mode")
-      .then((r) => r.json())
-      .then((r) => setDemo(r.demo))
-      .catch(() =>
-        setError("JanNetra cannot reach the server. Please try again."),
-      );
-  }, []);
   async function login(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setLoginBusy(true);
@@ -157,66 +161,39 @@ function App() {
   if (!session)
     return (
       <div className="login">
-        <div className="login-story">
-          <div className="brand">
-            <Eye /> JanNetra<span>जननेत्र</span>
-          </div>
-          <div>
-            <p className="eyebrow">SOCIAL SENTIMENT WATCHTOWER</p>
-            <h1>
-              Listen closely.
-              <br />
-              See the whole picture.
-            </h1>
-            <p>One workspace for the conversations shaping Bihar.</p>
-            <div className="login-rule" />
-            <span>JAN SURAAJ PARTY &nbsp; / &nbsp; PRASHANT KISHORE</span>
-          </div>
-          <small>Responsible monitoring · Aggregate public conversation</small>
-        </div>
         <form className="login-form" onSubmit={login}>
-          <ShieldCheck size={32} />
-          <h2>Welcome to your watchtower</h2>
-          <p>Sign in to the analyst workspace.</p>
-          {demo && (
-            <div className="demo-note">
-              <strong>Demonstration workspace</strong>
-              <br />
-              Synthetic posts. No live monitoring or notifications.
-              <br />
-              <small>Demo password: JanNetra-Demo-2026!</small>
+          <div className="login-intro">
+            <div className="login-logo">
+              <Eye />
+              <span>JanNetra</span>
             </div>
-          )}
-          <label>
-            Email
-            <input className="form-control"
-              name="email"
-              type="email"
-              required
-              defaultValue={demo ? "admin@jannetra.local" : ""}
-              autoComplete="username"
-            />
-          </label>
-          <label>
-            Password
-            <input className="form-control"
-              name="password"
-              type="password"
-              required
-              defaultValue={demo ? "JanNetra-Demo-2026!" : ""}
-              autoComplete="current-password"
-            />
-          </label>
+            <p>Political conversations, clearly understood.</p>
+          </div>
+          <h1>Log in to JanNetra</h1>
+          <input className="form-control"
+            aria-label="Email address"
+            placeholder="Email address"
+            name="email"
+            type="email"
+            required
+            autoComplete="username"
+          />
+          <input className="form-control"
+            aria-label="Password"
+            placeholder="Password"
+            name="password"
+            type="password"
+            required
+            autoComplete="current-password"
+          />
           {error && (
             <p role="alert" className="error">
               {error}
             </p>
           )}
           <button className="btn btn-primary primary" disabled={loginBusy}>
-            {loginBusy ? "Signing in…" : "Enter workspace"}
-            <ChevronRight size={17} />
+            {loginBusy ? "Signing in..." : "Log in"}
           </button>
-          <small>Access is logged. Sessions expire after 60 minutes.</small>
         </form>
       </div>
     );
@@ -281,93 +258,56 @@ function Workspace({
     setView(v);
     setMobile(false);
   };
+  const navigation = [
+    ["overview", "Overview", LayoutDashboard],
+    ["feed", "Conversation", Radio],
+    ["alerts", "Alerts", Bell],
+    ["settings", "Settings", Settings],
+  ] as const;
   return (
     <div className="shell">
-      <aside className={mobile ? "sidebar open" : "sidebar"}>
-        <div className="brand">
-          <Eye size={28} />
-          <div>
-            JanNetra<small>THE SENTIMENT WATCHTOWER</small>
+      <header className={mobile ? "app-navbar open" : "app-navbar"}>
+        <div className="navbar-inner">
+          <div className="navbar-brand">
+            <span className="navbar-logo"><Eye size={22} /></span>
+            <strong>JanNetra</strong>
           </div>
-        </div>
-        <div className="workspace-tag">
-          <span className="square">B</span>
-          <div>
-            Bihar intelligence<small>Political monitoring workspace</small>
-          </div>
-        </div>
-        <p className="nav-label">WORKSPACE</p>
-        <nav>
-          {[
-            ["overview", "Overview", LayoutDashboard],
-            ["feed", "Conversation feed", Radio],
-            ["alerts", "Alert centre", Bell],
-            ["settings", "Settings", Settings],
-          ].map(([key, label, Icon]) => (
-            <button
-              key={String(key)}
-              className={view === key ? "active" : ""}
-              onClick={() => navigate(String(key))}
-            >
-              {React.createElement(Icon as typeof Eye, { size: 18 })}
-              <span>{String(label)}</span>
-              {key === "alerts" && !!data?.alerts.length && (
-                <b>{data.alerts.length}</b>
-              )}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-monitor">
-          <p className="nav-label">TRACKING FOCUS</p>
-          <strong>Jan Suraaj Party</strong>
-          <span>Prashant Kishore · PK</span>
-          <span>Hindi · English · Hinglish</span>
-          <div className="side-rule" />
-          <ShieldCheck size={17} />
-          <span> Official APIs & compliant providers</span>
-        </div>
-        <div className="sidebar-bottom">
-          {data?.demo && <span className="demo-pill">DEMO WORKSPACE</span>}
-          <div className="user">
+          <button
+            className="mobile-toggle"
+            aria-label="Toggle navigation"
+            aria-expanded={mobile}
+            onClick={() => setMobile(!mobile)}
+          >
+            {mobile ? <Close /> : <Menu />}
+          </button>
+          <nav aria-label="Workspace navigation">
+            {navigation.map(([key, label, Icon]) => (
+              <button
+                key={key}
+                className={view === key ? "active" : ""}
+                onClick={() => navigate(key)}
+              >
+                <Icon size={19} />
+                <span>{label}</span>
+                {key === "alerts" && !!data?.alerts.length && (
+                  <b>{data.alerts.length}</b>
+                )}
+              </button>
+            ))}
+          </nav>
+          <div className="navbar-account">
             <span className="avatar">{session.email[0].toUpperCase()}</span>
             <div>
-              {session.role === "admin" ? "Administrator" : "Viewer"}
+              <strong>{session.role === "admin" ? "Administrator" : "Viewer"}</strong>
               <small>{session.email}</small>
             </div>
             <button title="Sign out" aria-label="Sign out" onClick={logout}>
-              <LogOut size={17} />
+              <LogOut size={18} />
             </button>
           </div>
         </div>
-      </aside>
-      <main>
-        <header className="topbar">
-          <div>
-            <button
-              className="mobile-toggle"
-              aria-label="Open navigation"
-              onClick={() => setMobile(!mobile)}
-            >
-              <Menu />
-            </button>
-            <span>Workspace</span>
-            <ChevronRight size={14} />
-            <strong>
-              {view === "feed"
-                ? "Conversation feed"
-                : view === "alerts"
-                  ? "Alert centre"
-                  : view === "settings"
-                    ? "Settings"
-                    : "Overview"}
-            </strong>
-          </div>
-          <span className="timezone">
-            <span className="status-dot" />{" "}
-            {data?.demo ? "Demo data" : "Monitoring workspace"} <i /> IST ·
-            Asia/Kolkata
-          </span>
-        </header>
+      </header>
+      <main className="workspace-main">
         <div className="content">
           <div className="page-heading">
             <div>
@@ -412,13 +352,6 @@ function Workspace({
               <button onClick={() => setRevision((x) => x + 1)}>Retry</button>
             </div>
           )}
-          {data?.demo && (
-            <div className="demo-strip">
-              <span className="demo-pill">DEMO</span> All posts and sentiment
-              labels are synthetic. External notifications are disabled.
-              <span className="demo-scope">X + YouTube sample data</span>
-            </div>
-          )}
           {!data && !error ? (
             <div className="empty">Loading the watchtower…</div>
           ) : (
@@ -427,7 +360,6 @@ function Workspace({
                 {view === "settings" ? (
                   <SettingsPanel
                     admin={session.role === "admin"}
-                    demo={data.demo}
                     onSaved={() => setRevision((x) => x + 1)}
                   />
                 ) : view === "alerts" ? (
@@ -452,10 +384,8 @@ function Workspace({
                             <span>
                               {num(a.negative_count)} negative posts · threshold{" "}
                               {num(a.threshold)} ·{" "}
-                              {data.demo
-                                ? "Demo — delivery disabled"
-                                : a.notified_channels.join(", ") ||
-                                  "Delivery pending / channels disabled"}
+                              {a.notified_channels.join(", ") ||
+                                "Delivery pending / channels disabled"}
                             </span>
                           </div>
                           <ChevronRight />
@@ -499,7 +429,7 @@ function Workspace({
                       )) && (
                       <div className="warning">
                         {data.partial
-                          ? "Some sources are unavailable. Figures are partial and may be stale. "
+                          ? "Figures are incomplete: some source data or classifications are pending. "
                           : ""}
                         {data.pending > 0
                           ? `${num(data.pending)} posts await classification. `
@@ -600,6 +530,20 @@ function Workspace({
                                     : "Awaiting data"
                                 }
                                 tone="negative"
+                              />
+                              <Stat
+                                label="MIXED"
+                                value={
+                                  data.today
+                                    ? num(data.today.mixed_count || 0)
+                                    : "â€”"
+                                }
+                                note={
+                                  data.today
+                                    ? `${(((data.today.mixed_count || 0) / data.today.total_count) * 100).toFixed(1)}% with both positive and negative stance`
+                                    : "Awaiting data"
+                                }
+                                tone="mixed"
                               />
                               <Stat
                                 label="NEGATIVITY INDEX"
@@ -793,7 +737,7 @@ function Workspace({
                                         (s) => s.status !== "disconnected",
                                       ).length
                                     }{" "}
-                                    of 4 connected{data.demo ? " in demo" : ""}
+                                    of 4 connected
                                   </span>
                                 </div>
                                 <div className="source-grid">
@@ -885,6 +829,7 @@ function Workspace({
                         <Feed
                           platform={platform}
                           revision={revision}
+                          defaultDay={data.date}
                           compact={view === "overview"}
                           onExpand={() => setView("feed")}
                         />
@@ -898,9 +843,7 @@ function Workspace({
           <footer>
             <span>
               <Eye size={14} /> JanNetra ·{" "}
-              {data?.demo
-                ? "Synthetic demonstration"
-                : "Public conversation monitoring"}
+              Public conversation monitoring
             </span>
             <span>
               Sentiment is a model estimate, not a measure of voting intent.
@@ -939,9 +882,7 @@ function Workspace({
             </div>
           ))}
           <p className="muted">
-            {data?.demo
-              ? "Demo alert. No external notification was sent."
-              : `Delivered: ${detail.notified_channels.join(", ") || "None"}`}
+            {`Delivered: ${detail.notified_channels.join(", ") || "None"}`}
           </p>
           {detail.notification_errors && (
             <p className="error">
@@ -1001,11 +942,13 @@ function Stat({
 function Feed({
   platform,
   revision,
+  defaultDay,
   compact,
   onExpand,
 }: {
   platform: string;
   revision: number;
+  defaultDay: string;
   compact: boolean;
   onExpand: () => void;
 }) {
@@ -1013,7 +956,7 @@ function Feed({
     [term, setTerm] = useState(""),
     [sentiment, setSentiment] = useState(""),
     [sort, setSort] = useState("engagement"),
-    [day, setDay] = useState(""),
+    [day, setDay] = useState(defaultDay),
     [page, setPage] = useState(1),
     [posts, setPosts] = useState<{ items: Post[]; total: number } | null>(null),
     [error, setError] = useState("");
@@ -1076,6 +1019,7 @@ function Feed({
           <option value="positive">Positive</option>
           <option value="negative">Negative</option>
           <option value="neutral">Neutral</option>
+          <option value="mixed">Mixed</option>
         </select>
         <select className="form-select"
           aria-label="Sort posts"
@@ -1117,7 +1061,6 @@ function Feed({
                   <b>{p.author}</b>
                   <span>
                     {names[p.platform]}
-                    {p.demo ? " · Sample" : ""}
                   </span>
                 </div>
                 <p>{p.content}</p>
@@ -1136,18 +1079,19 @@ function Feed({
                     </span>
                     <small title={p.sentiment.reason}>
                       {Math.round(p.sentiment.confidence * 100)}% confidence
-                      {p.sentiment.confidence < 0.7 ? " · Review" : ""}
+                      {p.sentiment.review_required ? " · Review" : ""}
                     </small>
                   </>
                 ) : (
-                  <span className="muted">Pending</span>
+                  <span className="muted">{p.classification_status === "awaiting_groq" ? "Awaiting Groq" : "Pending"}</span>
                 )}
               </div>
               <div>
                 <strong>{num(p.engagement_score)}</strong>
                 <small>
-                  {num(p.engagement.likes)} likes · {num(p.engagement.comments)}{" "}
-                  replies
+                  {num(p.engagement.likes)} likes / {p.platform === "youtube"
+                    ? `${num(p.engagement.views)} views`
+                    : `${num(p.engagement.comments)} replies`}
                 </small>
               </div>
               <div>
@@ -1282,11 +1226,9 @@ function ReportModal({ close }: { close: () => void }) {
 
 function SettingsPanel({
   admin,
-  demo,
   onSaved,
 }: {
   admin: boolean;
-  demo: boolean;
   onSaved: () => void;
 }) {
   const [prefs, setPrefs] = useState<any>(null),
@@ -1425,11 +1367,6 @@ function SettingsPanel({
               autoComplete="new-password"
             />
           </label>
-          {demo && (
-            <p className="warning">
-              Demo mode never sends email or webhook notifications.
-            </p>
-          )}
         </section>
         <div className="settings-save">
           {error && (
@@ -1466,11 +1403,9 @@ function SettingsPanel({
                 <div>
                   <strong>{name}</strong>
                   <p>
-                    {key === "facebook" || key === "instagram"
-                        ? "Owned/managed Graph API or a compliant paid provider"
-                        : key === "x"
-                          ? "Requires paid public-search access"
-                          : "Official Data API v3 · quota-aware schedule"}
+                    {key === "youtube"
+                      ? "Official Data API v3 - quota-aware schedule"
+                      : "Apify Actor - configured source monitoring"}
                   </p>
                 </div>
                 <span>
@@ -1479,15 +1414,15 @@ function SettingsPanel({
                     "Not connected"}
                 </span>
                 <button
-                  disabled={!admin || demo}
+                  disabled={!admin}
                   onClick={() =>
                     setCredential({
                       platform: key,
-                      mode: "official",
+                      mode: key === "youtube" ? "official" : "apify",
                       api_key: "",
-                      account_id: "",
-                      endpoint: "",
-                      replacements: "",
+                      actor_id: "",
+                      input_template: "",
+                      max_items: 200,
                     })
                   }
                 >
@@ -1497,19 +1432,13 @@ function SettingsPanel({
             );
           },
         )}
-        {demo && (
-          <p className="muted">
-            Credential entry is disabled in demo mode. Switch to live mode
-            before connecting real accounts.
-          </p>
-        )}
       </section>
       <section className="panel settings-section connections">
-        <div className="panel-title"><h2>Sentiment classifier</h2><span>Hugging Face · Local inference</span></div>
+        <div className="panel-title"><h2>Sentiment classifier</h2><span>Hugging Face + Groq fallback</span></div>
         <strong>{prefs.model}</strong>
-        <p>Status: {demo ? "Demo labels (model not run)" : prefs.classifier?.status || "pending"}</p>
-        <p>Post text stays on this server. The model classifies overall tone, not stance toward a particular person. Review Hinglish, sarcasm and low-confidence results.</p>
-        <p>Model and device are configured through the server environment. No classifier API key is required for the default public model.</p>
+        <p>Status: {prefs.classifier?.status || "pending"}</p>
+        <p>YouTube uses video titles only. Hugging Face scores below {Math.round((prefs.classifier?.threshold ?? 0.75) * 100)}% are sent to Groq for target-aware political sentiment. Confidence is not a guarantee of accuracy.</p>
+        <p>Groq fallback: {prefs.classifier?.fallback_configured ? `configured (${prefs.classifier?.fallback_model || "server model"})` : "key missing - low-confidence items remain pending"}. Models and threshold are configured through the server environment.</p>
         {prefs.classifier?.error && <p className="error">{prefs.classifier.error}</p>}
       </section>
       {credential && (
@@ -1524,12 +1453,7 @@ function SettingsPanel({
               try {
                 await json("/credentials", {
                   method: "PUT",
-                  body: JSON.stringify({
-                    ...credential,
-                    replacement_tokens: credential.replacements
-                      .split("\n")
-                      .filter(Boolean),
-                  }),
+                  body: JSON.stringify(credential),
                 });
                 setCredential(null);
                 onSaved();
@@ -1539,26 +1463,8 @@ function SettingsPanel({
               }
             }}
           >
-            {["facebook", "instagram"].includes(credential.platform) && (
-              <label>
-                Connection mode
-                <select className="form-select"
-                  value={credential.mode}
-                  onChange={(e) =>
-                    setCredential({ ...credential, mode: e.target.value })
-                  }
-                >
-                  <option value="official">
-                    Official Graph API · owned/managed
-                  </option>
-                  <option value="aggregator">
-                    Compliant third-party aggregator
-                  </option>
-                </select>
-              </label>
-            )}
             <label>
-              API key / access token
+              {credential.platform === "youtube" ? "YouTube API key" : "Apify API token"}
               <input className="form-control"
                 type="password"
                 autoComplete="new-password"
@@ -1570,48 +1476,35 @@ function SettingsPanel({
                 }
               />
             </label>
-            {["facebook", "instagram"].includes(credential.platform) &&
-              credential.mode === "official" && (
+            {credential.mode === "apify" && (
+              <details>
+                <summary>Advanced Actor override (optional)</summary>
+                <p>Leave these blank to use JanNetra's tested default Actor and input for this source.</p>
                 <label>
-                  Owned/managed account ID
+                  Apify Actor ID
                   <input className="form-control"
-                    required
-                    value={credential.account_id}
-                    onChange={(e) =>
-                      setCredential({
-                        ...credential,
-                        account_id: e.target.value,
-                      })
-                    }
+                    placeholder="Default selected automatically"
+                    value={credential.actor_id}
+                    onChange={(e) => setCredential({ ...credential, actor_id: e.target.value })}
                   />
                 </label>
-              )}
-            {credential.mode === "aggregator" && (
-              <label>
-                Provider adapter HTTPS endpoint
-                <input className="form-control"
-                  type="url"
-                  required
-                  value={credential.endpoint}
-                  onChange={(e) =>
-                    setCredential({ ...credential, endpoint: e.target.value })
-                  }
-                />
-              </label>
-            )}
-            {credential.platform === "x" && (
-              <label>
-                Replacement tokens (one per line)
-                <textarea className="form-control"
-                  value={credential.replacements}
-                  onChange={(e) =>
-                    setCredential({
-                      ...credential,
-                      replacements: e.target.value,
-                    })
-                  }
-                />
-              </label>
+                <label>
+                  Actor input JSON template
+                  <textarea className="form-control" rows={6}
+                    placeholder="Default input selected automatically"
+                    value={credential.input_template}
+                    onChange={(e) => setCredential({ ...credential, input_template: e.target.value })}
+                  />
+                  <small>Placeholders: {'{{keywords_json}}'}, {'{{query}}'}, {'{{since_iso}}'}, {'{{max_items}}'}</small>
+                </label>
+                <label>
+                  Maximum items per run
+                  <input className="form-control" type="number" min={1} max={1000}
+                    value={credential.max_items}
+                    onChange={(e) => setCredential({ ...credential, max_items: Number(e.target.value) })}
+                  />
+                </label>
+              </details>
             )}
             {error && <p className="error">{error}</p>}
             <button className="btn btn-primary primary">Save encrypted credential</button>

@@ -9,7 +9,7 @@ from app.sentiment import Result
 async def test_local_classifier_only_processes_pending_live_posts(monkeypatch, fails):
     db = AsyncMongoMockClient().test
     await db.posts.insert_many([
-        {'external_id': 'pending', 'sentiment': None, 'demo': False, 'content': 'A new post'},
+        {'platform': 'x', 'external_id': 'pending', 'sentiment': None, 'demo': False, 'content': 'A new post'},
         {'external_id': 'classified', 'sentiment': {'label': 'positive'}, 'demo': False, 'content': 'Old post'},
         {'external_id': 'demo', 'sentiment': None, 'demo': True, 'content': 'Synthetic post'},
     ])
@@ -29,12 +29,14 @@ async def test_local_classifier_only_processes_pending_live_posts(monkeypatch, f
     monkeypatch.setattr(services, 'classifier', Engine)
     monkeypatch.setattr(services, 'rollup', no_op)
     monkeypatch.setattr(services, 'notify_alerts', no_op)
+    monkeypatch.setattr(services, 'notify_negative_posts', no_op)
     await services.sync(db, None)
-    pending = await db.posts.find_one({'external_id': 'pending'})
+    pending = await db.posts.find_one({'platform': 'x', 'external_id': 'pending'})
     if fails:
         assert pending['sentiment'] is None
     else:
         assert pending['sentiment']['label'] == 'negative'
         assert pending['sentiment']['model_used'] == Engine.provenance
+        assert pending['telegram_notification']['status'] == 'pending'
     assert (await db.posts.find_one({'external_id': 'classified'}))['sentiment'] == {'label': 'positive'}
     assert (await db.posts.find_one({'external_id': 'demo'}))['sentiment'] is None

@@ -19,11 +19,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from typing import Literal
-from reportlab.pdfgen import canvas
-from .config import config
+from .config import config, DEFAULT_APIFY_ACTORS
+from .connectors import _author_name
 from .sentiment import classifier_status
 from .models import DOCUMENTS, now, Platform, Label
-from .services import KEYWORDS, PLATFORMS, today, bounds, settings, encrypt, audit, statuses, seed, sync
+from .services import POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, PLATFORMS, today, bounds, settings, encrypt, audit, statuses, seed, sync
+from .reporting import build_sentiment_pdf
 
 
 @asynccontextmanager
@@ -42,18 +43,51 @@ async def lifespan(app):
     await init_beanie(database=db, document_models=DOCUMENTS)
     app.state.db = db
     app.state.http = httpx.AsyncClient(timeout=30, follow_redirects=False)
-    if not await db.users.find_one({'email': c.bootstrap_email}):
-        hashed = await asyncio.to_thread(bcrypt.hashpw, c.bootstrap_password.encode(), bcrypt.gensalt())
-        await db.users.insert_one(dict(email=c.bootstrap_email, hashed_password=hashed.decode(), role='admin'))
-    for term in KEYWORDS:
+    if c.bootstrap_email:
+        if not await db.users.find_one({'email': c.bootstrap_email}):
+            hashed = await asyncio.to_thread(bcrypt.hashpw, c.bootstrap_password.encode(), bcrypt.gensalt())
+            await db.users.insert_one(dict(email=c.bootstrap_email, hashed_password=hashed.decode(), role='admin'))
+    elif not await db.users.find_one({}):
+        raise RuntimeError('No users exist. Set BOOTSTRAP_EMAIL and BOOTSTRAP_PASSWORD for the first startup only.')
+    for term in dict.fromkeys(KEYWORDS + DEFAULT_KEYWORD_VARIANTS):
         await db.tracked_keywords.update_one({'keyword': term}, {'$setOnInsert': {'keyword': term, 'is_active': True}}, upsert=True)
     await db.settings.update_one({'_id': 'main'}, {'$setOnInsert': {'threshold': 500, 'email': '', 'email_enabled': False, 'webhook_enabled': False}}, upsert=True)
-    for p, key, account in [('x', c.x_bearer_token, ''), ('youtube', c.youtube_api_key, ''),
-                             ('facebook', c.meta_access_token if c.meta_facebook_page_id else '', c.meta_facebook_page_id),
-                             ('instagram', c.meta_access_token if c.meta_instagram_account_id else '', c.meta_instagram_account_id)]:
-        if key and not c.seed_mock_data:
-            await db.platform_credentials.update_one({'platform': p}, {'$setOnInsert': dict(platform=p, mode='official',
-                encrypted_api_key=encrypt({'api_key': key, 'account_id': account}), status='pending', last_synced_at=None)}, upsert=True)
+    # Repair historical Facebook rows created when an Actor serialized its
+    # author object into a string. This keeps the UI and exports readable.
+    async for stored in db.posts.find({'platform': 'facebook', 'author': {'$regex': r'^\s*\{'}}, {'author': 1}):
+        cleaned_author = _author_name(stored.get('author'))
+        if cleaned_author != stored.get('author'):
+            await db.posts.update_one({'_id': stored['_id']}, {'$set': {'author': cleaned_author}})
+    if c.youtube_api_key and not c.seed_mock_data and 'youtube' in c.enabled_platforms.split(','):
+        await db.platform_credentials.update_one({'platform': 'youtube'}, {'$setOnInsert': dict(platform='youtube', mode='official',
+            encrypted_api_key=encrypt({'api_key': c.youtube_api_key}), status='pending', last_synced_at=None)}, upsert=True)
+    for p in ['facebook', 'instagram', 'x', 'news']:
+        actor_id = getattr(c, f'apify_{p}_actor_id')
+        if c.apify_api_token and actor_id and not c.seed_mock_data and p in c.enabled_platforms.split(','):
+            secret = {'api_key': c.apify_api_token, 'actor_id': actor_id,
+                      'input_template': getattr(c, f'apify_{p}_input_json'), 'max_items': c.apify_max_items}
+            await db.platform_credentials.update_one({'platform': p}, {'$set': dict(platform=p, mode='apify',
+                encrypted_api_key=encrypt(secret), status='pending', last_synced_at=None)}, upsert=True)
+        elif not c.seed_mock_data:
+            await db.platform_credentials.delete_one({'platform': p, 'mode': {'$ne': 'apify'}})
+    if not c.seed_mock_data and 'youtube' in c.enabled_platforms.split(','):
+        # One-time scope upgrade: refresh the last day using complete video snippets.
+        await db.platform_credentials.update_one({'platform': 'youtube',
+            'content_scope': {'$ne': 'youtube-title-only-v2'}},
+            {'$set': {'content_scope': 'youtube-title-only-v2', 'last_synced_at': None,
+                      'status': 'pending'}, '$unset': {'last_attempt_at': ''}})
+        await db.platform_credentials.update_one({'platform': 'youtube',
+            'search_strategy': {'$ne': 'keyword-and-short-v3'}},
+            {'$set': {'status': 'pending'}, '$unset': {'last_attempt_at': ''}})
+        # The active YouTube scope is deliberately title-only.
+        await db.posts.update_many({'platform': 'youtube', 'content_scope': 'youtube-title-only-v2'},
+                                   {'$unset': {'description': ''}})
+        # Taxonomy v2 adds "mixed". Reclassify each active record exactly once so
+        # historical charts use the same four-label definition as new ingestion.
+        await db.posts.update_many({**POST_SCOPE, 'demo': False, 'sentiment': {'$ne': None},
+                                    'sentiment_schema_version': {'$ne': 2}},
+                                   {'$set': {'sentiment': None, 'classification_status': 'pending'},
+                                    '$unset': {'classification_error': '', 'hf_candidate': ''}})
     if c.seed_mock_data:
         await seed(db)
         await sync(db, app.state.http)
@@ -143,31 +177,31 @@ async def overview(platform: Platform | None = None, user=Depends(current_user))
     sources = await statuses(db())
     usable = [s['platform'] for s in sources if s['status'] != 'disconnected']
     selected = [platform] if platform in usable else usable if platform is None else []
-    rows = await db().daily_aggregates.find({'date': {'$gte': (date.fromisoformat(today()) - timedelta(days=29)).isoformat()},
+    rows = await db().daily_aggregates.find({'content_scope': 'youtube-title-only-v2', 'date': {'$gte': (date.fromisoformat(today()) - timedelta(days=29)).isoformat()},
                                           'platform': {'$in': selected}}, {'_id': 0}).to_list(None)
     grouped = {}
     for r in rows:
-        out = grouped.setdefault(r['date'], dict(date=r['date'], positive_count=0, negative_count=0, neutral_count=0, total_count=0))
-        for k in ['positive_count', 'negative_count', 'neutral_count', 'total_count']:
-            out[k] += r[k]
+        out = grouped.setdefault(r['date'], dict(date=r['date'], positive_count=0, negative_count=0, neutral_count=0, mixed_count=0, total_count=0))
+        for k in ['positive_count', 'negative_count', 'neutral_count', 'mixed_count', 'total_count']:
+            out[k] += r.get(k, 0)
     for v in grouped.values():
         v['negativity_index'] = round(v['negative_count'] / v['total_count'] * 100, 1) if v['total_count'] else 0
     prefs = await settings(db())
-    pending = await db().posts.count_documents({'sentiment': None, 'platform': {'$in': selected}, 'demo': config().seed_mock_data})
+    pending = await db().posts.count_documents({**POST_SCOPE, 'sentiment': None, 'platform': {'$in': selected}, 'demo': config().seed_mock_data})
     await audit(db(), user, 'view.overview', {'platform': platform})
     return serialize(dict(demo=config().seed_mock_data, date=today(), timezone=config().reporting_timezone,
         sources=sources, today=grouped.get(today()), trend=sorted(grouped.values(), key=lambda x: x['date']),
         platform_totals=[r for r in rows if r['date'] == today()], pending=pending, threshold=prefs['threshold'],
         classifier=classifier_status(),
-        partial=any(s['status'] in ['unavailable', 'pending'] for s in sources if s['platform'] in selected),
-        alerts=await db().alerts.find({'resolved': False}).sort('date', -1).limit(30).to_list(30)))
+        partial=pending > 0 or any(s['status'] in ['unavailable', 'pending'] for s in sources if s['platform'] in selected),
+        alerts=await db().alerts.find({'resolved': False, 'content_scope': 'youtube-title-only-v2'}).sort('date', -1).limit(30).to_list(30)))
 
 @app.get('/api/posts')
 async def posts(q: str = Query('', max_length=200), platform: Platform | None = None, sentiment: Label | None = None,
                 day: date | None = None, sort: Literal['recency', 'engagement'] = 'recency', page: int = Query(1, ge=1, le=10000), user=Depends(current_user)):
     import re
     connected = [s['platform'] for s in await statuses(db()) if s['status'] != 'disconnected']
-    query = {'platform': platform if platform in connected else {'$in': connected if platform is None else []}, 'demo': config().seed_mock_data}
+    query = {**POST_SCOPE, 'platform': platform if platform in connected else {'$in': connected if platform is None else []}, 'demo': config().seed_mock_data}
     if q:
         # Escaped substring supports Hindi and PK consistently; text index available for analytical queries.
         query['content'] = {'$regex': re.escape(q), '$options': 'i'}
@@ -224,25 +258,35 @@ async def update_settings(value: Preferences, user=Depends(admin)):
     return {'saved': True}
 
 class CredentialInput(BaseModel):
-    platform: Literal['facebook', 'instagram', 'x', 'youtube']
-    mode: Literal['official', 'aggregator'] = 'official'
+    platform: Literal['facebook', 'instagram', 'x', 'youtube', 'news']
+    mode: Literal['official', 'apify'] = 'official'
     api_key: str = Field(min_length=10, max_length=10000)
-    account_id: str = ''
-    endpoint: str = ''
-    replacement_tokens: list[str] = Field(default_factory=list, max_length=5)
+    actor_id: str = Field(default='', max_length=200)
+    input_template: str = Field(default='', max_length=20000)
+    max_items: int = Field(default=200, ge=1, le=1000)
 
 @app.put('/api/credentials')
 async def credentials(value: CredentialInput, user=Depends(admin)):
     if config().seed_mock_data:
         raise HTTPException(409, 'Turn off demo mode before storing real credentials')
-    if value.mode == 'aggregator':
-        if value.platform not in ['facebook', 'instagram']:
-            raise HTTPException(422, 'Aggregator mode is supported only for Meta platforms')
-        await public_https(value.endpoint)
-    elif value.platform in ['facebook', 'instagram'] and not value.account_id.isdigit():
-        raise HTTPException(422, 'Owned/managed numeric account ID required')
-    secret = {'api_key': value.api_key, 'account_id': value.account_id, 'endpoint': value.endpoint,
-              'tokens': [value.api_key] + value.replacement_tokens}
+    if value.platform == 'youtube' and value.mode != 'official':
+        raise HTTPException(422, 'YouTube uses the official Data API')
+    if value.platform != 'youtube' and value.mode != 'apify':
+        raise HTTPException(422, 'Facebook, Instagram, X and News use Apify')
+    if value.mode == 'apify':
+        import json, re
+        value.actor_id = value.actor_id.strip() or DEFAULT_APIFY_ACTORS[value.platform]
+        if not re.fullmatch(r'[A-Za-z0-9_-]+(?:[~/][A-Za-z0-9_.-]+)?', value.actor_id):
+            raise HTTPException(422, 'A valid Apify Actor ID is required')
+        if value.input_template:
+            try:
+                rendered = value.input_template.replace('{{keywords_json}}', '[]').replace('{{query}}', 'query').replace('{{since_iso}}', '2026-01-01T00:00:00Z').replace('{{max_items}}', '1')
+                if not isinstance(json.loads(rendered), dict):
+                    raise ValueError
+            except (json.JSONDecodeError, ValueError):
+                raise HTTPException(422, 'Apify input template must render to a JSON object')
+    secret = {'api_key': value.api_key, 'actor_id': value.actor_id,
+              'input_template': value.input_template, 'max_items': value.max_items}
     await db().platform_credentials.update_one({'platform': value.platform}, {'$set': dict(platform=value.platform, mode=value.mode,
         encrypted_api_key=encrypt(secret), status='pending', error=None)}, upsert=True)
     await audit(db(), user, 'credentials.rotate', {'platform': value.platform})
@@ -283,28 +327,43 @@ async def add_user(value: NewUser, user=Depends(admin)):
 @app.get('/api/export')
 async def export(period: Literal['daily', 'weekly', 'monthly'] = 'daily', format: Literal['csv', 'pdf'] = 'csv', user=Depends(current_user)):
     count = {'daily': 1, 'weekly': 7, 'monthly': 30}[period]
-    start = (date.fromisoformat(today()) - timedelta(days=count - 1)).isoformat()
-    connected = [s['platform'] for s in await statuses(db()) if s['status'] != 'disconnected']
-    rows = await db().daily_aggregates.find({'date': {'$gte': start, '$lte': today()}, 'platform': {'$in': connected}}, {'_id': 0}).sort([('date', 1), ('platform', 1)]).to_list(None)
-    fields = ['date', 'platform', 'positive_count', 'negative_count', 'neutral_count', 'total_count', 'negativity_index']
-    source_status = '; '.join(f'{s["platform"]}: {s["source"]}/{s["status"]}' for s in await statuses(db()))
+    end_day = today()
+    start = (date.fromisoformat(end_day) - timedelta(days=count - 1)).isoformat()
+    source_rows = await statuses(db())
+    connected = [s['platform'] for s in source_rows if s['status'] != 'disconnected']
+    rows = await db().daily_aggregates.find({'content_scope': 'youtube-title-only-v2', 'date': {'$gte': start, '$lte': today()}, 'platform': {'$in': connected}}, {'_id': 0}).sort([('date', 1), ('platform', 1)]).to_list(None)
+    fields = ['date', 'platform', 'positive_count', 'negative_count', 'neutral_count', 'mixed_count', 'total_count', 'negativity_index']
+    source_status = '; '.join(f'{s["platform"]}: {s["source"]}/{s["status"]}' for s in source_rows)
     if format == 'csv':
         stream = io.StringIO(); writer = csv.DictWriter(stream, fieldnames=fields + ['mode', 'source_status'], extrasaction='ignore'); writer.writeheader()
         writer.writerows([{**r, 'mode': 'DEMO' if config().seed_mock_data else 'LIVE', 'source_status': source_status} for r in rows])
         content = stream.getvalue().encode('utf-8-sig'); mime = 'text/csv'
     else:
-        stream = io.BytesIO(); pdf = canvas.Canvas(stream, pagesize=(842, 595))
-        def heading():
-            pdf.setFont('Helvetica-Bold', 20); pdf.drawString(40, 550, 'JanNetra | Sentiment report' + (' | DEMO' if config().seed_mock_data else ''))
-            pdf.setFont('Helvetica', 10); pdf.drawString(40, 525, f'{start} to {today()} | {config().reporting_timezone} | Negative / classified x 100')
-            pdf.drawString(40, 507, source_status[:145]); pdf.drawString(40, 483, 'Date           Platform          Positive       Negative       Neutral        Total        Negativity %')
-        heading(); y = 462
-        for r in rows:
-            if y < 50:
-                pdf.showPage(); heading(); y = 462
-            pdf.setFont('Courier', 10)
-            pdf.drawString(40, y, f'{r["date"]}   {r["platform"]:12} {r["positive_count"]:8} {r["negative_count"]:12} {r["neutral_count"]:12} {r["total_count"]:10} {r["negativity_index"]:12.1f}')
-            y -= 18
-        pdf.save(); content = stream.getvalue(); mime = 'application/pdf'
+        range_start, _ = bounds(start)
+        _, range_end = bounds(end_day)
+        negative_posts = await db().posts.find({
+            **POST_SCOPE,
+            'published_at': {'$gte': range_start, '$lt': range_end},
+            'platform': {'$in': connected},
+            'sentiment.label': 'negative',
+            'demo': config().seed_mock_data,
+        }, {
+            '_id': 0, 'platform': 1, 'author': 1, 'content': 1, 'url': 1,
+            'published_at': 1, 'engagement': 1, 'engagement_score': 1,
+            'sentiment.label': 1, 'sentiment.confidence': 1,
+        }).sort([('platform', 1), ('published_at', -1)]).to_list(None)
+        stream = io.BytesIO()
+        build_sentiment_pdf(
+            stream,
+            start=start,
+            end=end_day,
+            period=period,
+            timezone_name=config().reporting_timezone,
+            rows=rows,
+            negative_posts=negative_posts,
+            source_rows=source_rows,
+            demo=config().seed_mock_data,
+        )
+        content = stream.getvalue(); mime = 'application/pdf'
     await audit(db(), user, 'export.' + format, {'period': period})
     return Response(content, media_type=mime, headers={'Content-Disposition': f'attachment; filename="jannetra-{period}-{today()}.{format}"'})

@@ -17,8 +17,6 @@ services:
         required: false
     environment:
       MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017}
-      SEED_MOCK_DATA: ${SEED_MOCK_DATA:-true}
-      DEMO_IN_MEMORY: "false"
       HF_CACHE_DIR: /home/app/.cache/huggingface
     volumes:
       - hf_cache:/home/app/.cache/huggingface

@@ -6,17 +6,26 @@ import json
 from datetime import timedelta
 import pytest
 import httpx
+from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
+from app.config import Config
 from app.models import now
-from app.services import bounds, today, create_alert, statuses, encrypt, decrypt
+from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts
 from app.sentiment import Classifier
-from app.connectors import matches, x_posts, ProviderError, request
+from app.connectors import matches, apify_posts, _actor_input, ProviderError, request
 
 
 def test_timezone_boundary():
     start, end = bounds('2026-09-28')
     assert start.isoformat() == '2026-09-27T18:30:00+00:00'
     assert end - start == timedelta(days=1)
+
+
+def test_bootstrap_credentials_are_optional_for_existing_database():
+    settings = Config(_env_file=None, seed_mock_data=False, demo_in_memory=False,
+                      jwt_secret='x' * 32, encryption_key=Fernet.generate_key().decode(),
+                      bootstrap_email='', bootstrap_password='')
+    assert settings.bootstrap_email == '' and settings.bootstrap_password == ''
 
 
 def test_encryption():
@@ -32,10 +41,51 @@ def test_keyword_matching_hindi_and_pk():
     assert not matches('APK file download', ['PK'])
 
 
+def test_token_only_apify_inputs_are_platform_specific():
+    since = now() - timedelta(hours=2)
+    keywords = ['Jan Suraaj', 'Prashant Kishore']
+    assert _actor_input('facebook', '', keywords, since, 20)['searchType'] == 'posts'
+    assert _actor_input('instagram', '', keywords, since, 20)['searchQueries'] == keywords
+    assert _actor_input('x', '', keywords, since, 20)['searchTerms'] == keywords
+    news = _actor_input('news', '', keywords, since, 20)
+    assert news['query'] == '"Jan Suraaj" OR "Prashant Kishore"'
+    assert news['maxItems'] == 100 and news['time_period'] == 'custom'
+
+
 @pytest.mark.asyncio
 async def test_webhook_accepts_empty_success_response():
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(204))) as client:
         assert await request(client, 'POST', 'https://example.org/hook', response_json=False, json={'date': today()}) == {}
+
+
+@pytest.mark.asyncio
+async def test_negative_post_telegram_alert_is_idempotent(monkeypatch):
+    db = AsyncMongoMockClient().test
+    await db.posts.insert_one({
+        'platform': 'facebook', 'external_id': 'negative-1', 'author': 'News Desk',
+        'content': 'Jan Suraaj Party plan faces criticism',
+        'url': 'https://example.org/post/negative-1', 'published_at': now(), 'demo': False,
+        'sentiment': {'label': 'negative', 'confidence': .91},
+        'telegram_notification': {'status': 'pending'},
+    })
+    class Settings:
+        seed_mock_data = False
+        telegram_bot_token = '123456:test_bot_token_value_long_enough'
+        telegram_chat_id = '-1001234567890'
+    monkeypatch.setattr('app.services.config', lambda: Settings())
+    requests = []
+    def handler(req):
+        requests.append(req)
+        return httpx.Response(200, json={'ok': True, 'result': {'message_id': 1}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await notify_negative_posts(db, client)
+        await notify_negative_posts(db, client)
+    stored = await db.posts.find_one({'external_id': 'negative-1'})
+    assert stored['telegram_notification']['status'] == 'sent'
+    assert len(requests) == 1
+    payload = json.loads(requests[0].content)
+    assert payload['chat_id'] == '-1001234567890'
+    assert 'https://example.org/post/negative-1' in payload['text']
 
 
 def test_hf_label_mapping_and_low_confidence():
@@ -100,30 +150,76 @@ async def test_alert_strict_threshold_and_idempotence():
 
 
 @pytest.mark.asyncio
-async def test_meta_unconfigured_is_disconnected():
+async def test_apify_sources_unconfigured_are_disconnected():
     result = await statuses(AsyncMongoMockClient().test)
-    for p in ['facebook', 'instagram']:
+    for p in ['facebook', 'instagram', 'news']:
         s = next(x for x in result if x['platform'] == p)
         assert s['source'] == 'Not connected' and s['status'] == 'disconnected'
 
 
 @pytest.mark.asyncio
-async def test_x_does_not_rotate_to_evade_rate_limit():
-    tokens = []
+async def test_apify_actor_normalizes_and_filters_items():
+    requests = []
     def handler(req):
-        tokens.append(req.headers['Authorization'])
-        return httpx.Response(429, headers={'retry-after': '900'})
+        requests.append(req)
+        return httpx.Response(200, json=[
+            {'postId': '42', 'text': 'Jan Suraaj Party rally update', 'createdAt': now().isoformat(),
+             'postUrl': 'https://example.org/post/42', 'authorName': 'Reporter', 'likesCount': '12'},
+            {'postId': '43', 'text': 'Unrelated post', 'createdAt': now().isoformat()},
+        ])
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(ProviderError):
-            await x_posts(client, {'tokens': ['one', 'two']}, ['Jan Suraaj'], now() - timedelta(hours=1))
-    assert tokens == ['Bearer one']
+        rows = await apify_posts(client, 'facebook', {'api_key': 'apify-token-value', 'actor_id': 'owner~facebook-actor',
+            'input_template': '{"queries": {{keywords_json}}, "since": "{{since_iso}}"}', 'max_items': 50},
+            ['Jan Suraaj'], now() - timedelta(hours=1))
+    assert len(rows) == 1 and rows[0]['external_id'] == '42'
+    assert rows[0]['engagement']['likes'] == 12 and rows[0]['source_provider'] == 'apify'
+    assert requests[0].headers['Authorization'] == 'Bearer apify-token-value'
+    assert '/actors/owner~facebook-actor/run-sync-get-dataset-items' in str(requests[0].url)
 
 
 @pytest.mark.asyncio
-async def test_x_rotates_expired_token():
+async def test_apify_normalizes_serialized_facebook_author():
+    captured = []
     def handler(req):
-        if req.headers['Authorization'] == 'Bearer one':
-            return httpx.Response(401)
-        return httpx.Response(200, json={'data': [], 'meta': {}})
+        captured.append(req)
+        return httpx.Response(200, json=[{
+            'postId': 'fb-1', 'text': 'Jan Suraaj Party teachers update',
+            'createdAt': now().isoformat(),
+            'author': "{'id': '123', 'name': 'Jagarit Bihar', 'profilePic': 'https://example.org/long.jpg'}",
+        }])
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            assert await x_posts(client, {'tokens': ['one', 'two']}, ['Jan Suraaj'], now() - timedelta(hours=1)) == []
+        rows = await apify_posts(client, 'facebook', {
+            'api_key': 'token', 'actor_id': 'apify~facebook-search-scraper', 'max_items': 50,
+        }, ['Jan Suraaj'], now() - timedelta(hours=1))
+    assert rows[0]['author'] == 'Jagarit Bihar'
+
+
+@pytest.mark.asyncio
+async def test_easyapi_news_input_and_output_mapping():
+    captured = []
+    def handler(req):
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=[{
+            'title': 'Prashant Kishore addresses Bihar rally',
+            'snippet': 'Jan Suraaj leaders shared the campaign plan.',
+            'link': 'https://news.example.org/story', 'source': 'News Desk',
+            'date_utc': now().isoformat(),
+        }])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        rows = await apify_posts(client, 'news', {
+            'api_key': 'token', 'actor_id': 'easyapi~google-news-scraper', 'max_items': 50,
+        }, ['Jan Suraaj', 'Prashant Kishore'], now() - timedelta(days=1))
+    assert captured[0]['maxItems'] == 100
+    assert captured[0]['query'] == '"Jan Suraaj" OR "Prashant Kishore"'
+    assert rows[0]['author'] == 'News Desk'
+    assert rows[0]['url'] == 'https://news.example.org/story'
+    assert 'campaign plan' in rows[0]['content']
+
+
+@pytest.mark.asyncio
+async def test_apify_rejects_unmapped_dataset():
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=[{'text': 'Jan Suraaj update'}]))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(ProviderError):
+            await apify_posts(client, 'news', {'api_key': 'apify-token-value', 'actor_id': 'news-actor'},
+                              ['Jan Suraaj'], now() - timedelta(hours=1))

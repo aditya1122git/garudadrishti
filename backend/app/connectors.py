@@ -1,12 +1,15 @@
-"""Official APIs only. Provider adapters accept a documented normalized HTTPS contract."""
+"""Rate-aware source connectors for YouTube and Apify-backed monitoring."""
 import asyncio
+import ast
+import hashlib
+import json
 import random
 import re
 import time
 import socket
 import ipaddress
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 import httpx
 from .config import config
 
@@ -64,122 +67,220 @@ def post(platform, external_id, author, content, url, timestamp, engagement=None
                 ingested_at=datetime.now(timezone.utc), sentiment=None, demo=False)
 
 
-async def x_posts(client, secret, keywords, since):
-    # Rotation is for token replacement/failover; never evade provider/account quotas.
-    tokens = secret.get('tokens') or [secret['api_key']]
-    query = '(' + ' OR '.join('"' + k.replace('"', '') + '"' for k in keywords) + ') -is:retweet'
-    if len(query) > 512:
-        raise ProviderError('X query exceeds 512 characters; reduce keywords')
-    params = {'query': query, 'max_results': 100, 'tweet.fields': 'created_at,public_metrics,author_id',
-              'start_time': since.isoformat().replace('+00:00', 'Z')}
-    rows = []
-    for _ in range(10):
-        data = None
-        for token in tokens:
-            try:
-                data = await request(client, 'GET', 'https://api.x.com/2/tweets/search/recent', params=params,
-                                     headers={'Authorization': f'Bearer {token}'})
-            except ProviderError as exc:
-                if '(401)' in str(exc):
-                    continue
-                raise
-            break
-        if data is None:
-            raise ProviderError('No valid X token')
-        for p in data.get('data', []):
-            m = p.get('public_metrics', {})
-            rows.append(post('x', p['id'], p['author_id'], p['text'], f'https://x.com/i/status/{p["id"]}', p['created_at'],
-                             dict(likes=m.get('like_count', 0), comments=m.get('reply_count', 0), shares=m.get('retweet_count', 0), views=m.get('impression_count', 0))))
-        token = data.get('meta', {}).get('next_token')
-        if not token:
-            return rows
-        params['next_token'] = token
-    raise ProviderError('X pagination cap reached; shorten sync window before advancing checkpoint')
-
-
 async def youtube_posts(client, secret, keywords, since):
     base = 'https://www.googleapis.com/youtube/v3/'
-    # One combined query per run, at most 3 search pages; hourly scheduling below.
-    params = dict(key=secret['api_key'], part='snippet', type='video', order='date', maxResults=50,
-                  q='|'.join(keywords), publishedAfter=since.isoformat().replace('+00:00', 'Z'))
+    # Search results are relevance-ranked rather than exhaustive. Split terms into
+    # small OR groups and run an additional official short-duration query per group.
     rows = []
-    videos = []
-    for _ in range(3):
-        data = await request(client, 'GET', base + 'search', params=params)
-        videos.extend(data.get('items', []))
-        if not data.get('nextPageToken'):
-            break
-        params['pageToken'] = data['nextPageToken']
-    else:
-        raise ProviderError('YouTube search pagination cap reached; checkpoint retained')
-    # Revisit a bounded set of previously discovered videos to catch newer comments.
-    seen = set()
-    for v in videos + secret.get('watched_videos', []):
-        vid = v['id']['videoId']
-        if vid in seen:
-            continue
-        seen.add(vid)
-        s = v['snippet']
-        rows.append(post('youtube', vid, s['channelTitle'], s['title'] + '\n' + s.get('description', ''),
-                         f'https://www.youtube.com/watch?v={vid}', s['publishedAt']))
-        cp = dict(key=secret['api_key'], part='snippet', videoId=vid, maxResults=100, order='time', textFormat='plainText')
-        for _ in range(5):
-            comments = await request(client, 'GET', base + 'commentThreads', params=cp, comments_optional=True)
-            reached_old = False
-            for t in comments.get('items', []):
-                c = t['snippet']['topLevelComment']; cs = c['snippet']
-                if datetime.fromisoformat(cs['publishedAt'].replace('Z', '+00:00')) < since:
-                    reached_old = True
-                    continue
-                if matches(cs['textDisplay'], keywords):
-                    rows.append(post('youtube', c['id'], cs['authorDisplayName'], cs['textDisplay'],
-                                     f'https://www.youtube.com/watch?v={vid}&lc={c["id"]}', cs['publishedAt'], {'likes': cs['likeCount']}))
-            if reached_old or not comments.get('nextPageToken'):
-                break
-            cp['pageToken'] = comments['nextPageToken']
-        else:
-            raise ProviderError('YouTube comment pagination cap reached; checkpoint retained')
-    secret['watched_videos'] = (videos + secret.get('watched_videos', []))[:30]
+    videos = {}
+    group_size = config().youtube_terms_per_query
+    for offset in range(0, len(keywords), group_size):
+        query = '|'.join(keywords[offset:offset + group_size])
+        for duration in (None, 'short'):
+            params = dict(key=secret['api_key'], part='snippet', type='video', order='date', maxResults=50,
+                          q=query, publishedAfter=since.isoformat().replace('+00:00', 'Z'))
+            if duration:
+                # The API defines videoDuration=short as under four minutes. It is
+                # the supported search filter that improves Shorts coverage.
+                params['videoDuration'] = duration
+            data = await request(client, 'GET', base + 'search', params=params)
+            for item in data.get('items', []):
+                video_id = item.get('id', {}).get('videoId')
+                if video_id:
+                    videos.setdefault(video_id, set()).add('short-search' if duration else 'general-search')
+    # Fetch stable video metadata in batches. Sentiment uses the title only.
+    ids = list(videos)
+    for offset in range(0, len(ids), 50):
+        details = await request(client, 'GET', base + 'videos', params=dict(
+            key=secret['api_key'], part='snippet,statistics,contentDetails', id=','.join(ids[offset:offset + 50])))
+        for video in details.get('items', []):
+            vid, snippet = video['id'], video['snippet']
+            title = snippet['title']
+            if not matches(title, keywords):
+                continue
+            stats = video.get('statistics', {})
+            row = post('youtube', vid, snippet['channelTitle'], title,
+                       f'https://www.youtube.com/watch?v={vid}', snippet['publishedAt'],
+                       dict(likes=stats.get('likeCount', 0), views=stats.get('viewCount', 0)))
+            short_candidate = 'short-search' in videos[vid]
+            row.update(content_type='short' if short_candidate else 'video', title=title,
+                       discovery=sorted(videos[vid]),
+                       content_scope='youtube-title-only-v2')
+            rows.append(row)
+    secret.pop('watched_videos', None)
     return rows
 
 
-async def meta_posts(client, platform, secret, keywords, since):
-    account = secret['account_id']
-    if not account.isdigit():
-        raise ProviderError('Meta account ID must be numeric')
-    ig = platform == 'instagram'
-    edge = 'media' if ig else 'posts'
-    fields = 'id,caption,timestamp,permalink,like_count,comments_count' if ig else 'id,message,created_time,permalink_url,shares'
-    url = f'https://graph.facebook.com/{config().meta_graph_version}/{account}/{edge}'
-    params = dict(fields=fields, limit=100, since=int(since.timestamp()))
-    rows = []
-    for _ in range(10):
-        data = await request(client, 'GET', url, params=params, headers={'Authorization': f'Bearer {secret["api_key"]}'})
-        for p in data.get('data', []):
-            content = p.get('caption' if ig else 'message', '')
-            timestamp = p['timestamp' if ig else 'created_time']
-            if matches(content, keywords) and datetime.fromisoformat(timestamp.replace('Z', '+00:00')) >= since:
-                rows.append(post(platform, p['id'], account, content, p.get('permalink' if ig else 'permalink_url', ''), timestamp,
-                                 dict(likes=p.get('like_count', 0), comments=p.get('comments_count', 0), shares=p.get('shares', {}).get('count', 0))))
-        paging = data.get('paging', {})
-        if not paging.get('next'):
-            return rows
-        params['after'] = paging['cursors']['after']
-    raise ProviderError('Meta pagination cap reached; checkpoint retained')
+def _first(item, *paths, default=None):
+    """Return the first non-empty value from common Actor output shapes."""
+    for path in paths:
+        value = item
+        for part in path.split('.'):
+            if not isinstance(value, dict) or part not in value:
+                value = None
+                break
+            value = value[part]
+        if value not in (None, ''):
+            return value
+    return default
 
 
-async def aggregator_posts(client, platform, secret, keywords, since):
-    # Vendor-specific payload/auth mapping lives in the organization's trusted adapter.
-    endpoint = secret['endpoint']
-    await validate_destination(endpoint)
+def _number(item, *paths):
+    value = _first(item, *paths, default=0)
+    try:
+        return max(0, int(float(str(value).replace(',', ''))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _author_name(value):
+    """Normalize Actor author objects, including Python-repr strings."""
+    if isinstance(value, dict):
+        nested = _first(value, 'name', 'fullName', 'displayName', 'userName', 'username', default='')
+        return str(nested).strip() or 'Unknown'
+    if isinstance(value, (list, tuple)):
+        return _author_name(value[0]) if value else 'Unknown'
+    text = str(value or '').strip()
+    if text.startswith('{') and text.endswith('}'):
+        parsed = None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                pass
+        if isinstance(parsed, dict):
+            return _author_name(parsed)
+        # Never expose a provider's serialized metadata blob as an author name.
+        return 'Unknown'
+    return text[:160] or 'Unknown'
+
+
+def _timestamp(value):
+    if isinstance(value, (int, float)):
+        # Accept Unix seconds and milliseconds returned by different Actors.
+        value = value / 1000 if value > 10_000_000_000 else value
+        return datetime.fromtimestamp(value, timezone.utc)
+    if not value:
+        raise ProviderError('Apify item has no publication timestamp')
+    text = str(value).strip().replace('Z', '+00:00')
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        # RFC 2822 is common in RSS/news Actor output.
+        from email.utils import parsedate_to_datetime
+        try:
+            parsed = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            raise ProviderError('Apify item has an invalid publication timestamp') from None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def _actor_input(platform, template, keywords, since, max_items):
+    if not template:
+        per_query = max(1, min(50, max_items // max(len(keywords), 1)))
+        defaults = {
+            'facebook': {'categories': keywords, 'searchType': 'posts', 'resultsLimit': max_items},
+            'instagram': {'searchQueries': keywords[:10], 'maxResultsPerQuery': per_query},
+            'x': {'searchTerms': keywords, 'maxItems': max_items, 'sort': 'Latest'},
+            # easyapi/google-news-scraper accepts one query and requires at
+            # least 100 requested results. The response is still capped by
+            # `limit=max_items` in our Apify API call.
+            'news': {'query': ' OR '.join(f'"{term}"' for term in keywords),
+                     'maxItems': max(100, max_items), 'time_period': 'custom',
+                     'time_period_min': since.strftime('%m/%d/%Y'),
+                     'time_period_max': datetime.now(timezone.utc).strftime('%m/%d/%Y'),
+                     'nfpr': 1, 'filter': 1},
+        }
+        return defaults[platform]
+    values = {
+        '{{keywords_json}}': json.dumps(keywords, ensure_ascii=False),
+        '{{query}}': ' OR '.join(f'"{term}"' for term in keywords),
+        '{{since_iso}}': since.isoformat().replace('+00:00', 'Z'),
+        '{{max_items}}': str(max_items),
+    }
+    raw = template
+    for marker, value in values.items():
+        # JSON string values must be encoded when substituted inside quotes.
+        replacement = value if marker in ('{{keywords_json}}', '{{max_items}}') else json.dumps(value, ensure_ascii=False)[1:-1]
+        raw = raw.replace(marker, replacement)
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ProviderError(f'Invalid Apify input template: {exc.msg}') from None
+    if not isinstance(result, dict):
+        raise ProviderError('Apify input template must be a JSON object')
+    return result
+
+
+def _apify_item(platform, item, keywords, since):
+    if not isinstance(item, dict):
+        return None
+    title = str(_first(item, 'title', 'headline', 'article.title', default='')).strip()
+    text = str(_first(item, 'text', 'full_text', 'tweetText', 'postText', 'message', 'caption',
+                      'description', 'snippet', 'article.description', default='')).strip()
+    # News benefits from its headline plus summary. Social Actors usually expose
+    # the post body in `text`/`caption`; do not ingest replies or comments.
+    content = ' — '.join(dict.fromkeys(x for x in (title, text) if x)) if platform == 'news' else (text or title)
+    if not content or not matches(content, keywords):
+        return None
+    published = _timestamp(_first(item, 'publishedAt', 'published_at', 'createdAt', 'created_at', 'takenAt',
+                                  'date_utc', 'timestamp', 'date', 'time', 'article.publishedAt'))
+    if published < since:
+        return None
+    url = str(_first(item, 'url', 'postUrl', 'tweetUrl', 'permalink', 'link', 'article.url', default=''))
+    external_id = _first(item, 'id', 'postId', 'tweetId', 'shortCode', 'shortcode', 'article.id')
+    if not external_id:
+        external_id = hashlib.sha256(f'{platform}\0{url}\0{content}\0{published.isoformat()}'.encode()).hexdigest()
+    author = _author_name(_first(item, 'authorName', 'pageName', 'author.name', 'author.userName', 'author.username',
+                                'author', 'ownerUsername', 'username', 'fullName', 'user.name', 'user',
+                                'channelName', 'source', 'publisher', default='Unknown'))
+    engagement = dict(
+        likes=_number(item, 'likesCount', 'likeCount', 'likes', 'favoriteCount', 'stats.likes', 'reactions_count', 'public_metrics.like_count'),
+        comments=_number(item, 'commentsCount', 'commentCount', 'comments', 'replyCount', 'stats.comments', 'comments_count', 'public_metrics.reply_count'),
+        shares=_number(item, 'sharesCount', 'shareCount', 'shares', 'retweetCount', 'stats.shares', 'reshare_count', 'public_metrics.retweet_count'),
+        views=_number(item, 'viewsCount', 'viewCount', 'views', 'impressionCount', 'public_metrics.impression_count'),
+    )
+    row = post(platform, external_id, author, content, url, published.isoformat(), engagement)
+    row.update(source_provider='apify', content_scope='apify-public-post-v1')
+    if platform == 'news':
+        row['title'] = title
+    return row
+
+
+async def apify_posts(client, platform, secret, keywords, since):
+    """Run a configured Apify Actor and normalize its default dataset items.
+
+    Actor output formats vary, so this adapter accepts the common field names
+    used by social/news Actors. A custom Actor can use the canonical names
+    documented in the README for deterministic mapping.
+    """
+    actor_id = str(secret.get('actor_id', '')).strip()
+    if not re.fullmatch(r'[A-Za-z0-9_-]+(?:[~/][A-Za-z0-9_.-]+)?', actor_id):
+        raise ProviderError('Invalid or missing Apify Actor ID')
+    max_items = min(max(int(secret.get('max_items', config().apify_max_items)), 1), 1000)
+    payload = _actor_input(platform, secret.get('input_template', ''), keywords, since, max_items)
+    actor_path = quote(actor_id.replace('/', '~'), safe='~')
+    url = f'https://api.apify.com/v2/actors/{actor_path}/run-sync-get-dataset-items'
+    data = await request(client, 'POST', url,
+                         params={'format': 'json', 'clean': '1', 'limit': max_items, 'maxItems': max_items,
+                                 'timeout': config().apify_run_timeout_seconds},
+                         headers={'Authorization': f'Bearer {secret["api_key"]}', 'Content-Type': 'application/json'},
+                         timeout=config().apify_run_timeout_seconds + 15,
+                         json=payload)
+    if not isinstance(data, list):
+        raise ProviderError('Apify Actor did not return a dataset item array')
     rows = []
-    cursor = None
-    for _ in range(10):
-        data = await request(client, 'POST', endpoint, headers={'Authorization': f'Bearer {secret["api_key"]}'},
-                             json=dict(platform=platform, keywords=keywords, since=since.isoformat(), cursor=cursor))
-        for p in data['posts']:
-            rows.append(post(platform, p['id'], p['author'], p['content'], p['url'], p['published_at'], p.get('engagement')))
-        cursor = data.get('next_cursor')
-        if not cursor:
-            return rows
-    raise ProviderError('Aggregator pagination cap reached; checkpoint retained')
+    invalid = 0
+    for item in data:
+        try:
+            row = _apify_item(platform, item, keywords, since)
+        except ProviderError:
+            invalid += 1
+            continue
+        if row:
+            rows.append(row)
+    if data and invalid == len(data):
+        raise ProviderError('Apify output has no usable publication timestamps; check Actor mapping')
+    return rows

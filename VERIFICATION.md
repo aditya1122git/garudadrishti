@@ -20,8 +20,8 @@ Built and checked on 28 September 2026 using Python 3.12 and Node 24 on Windows.
 ## Not yet verified against live infrastructure
 
 - Docker/Compose startup and real MongoDB `$dateTrunc` execution: Docker and MongoDB are not installed on this build machine. An optional `tests/test_mongo.py` test checks actual MongoDB timezone aggregation and uniqueness when `TEST_MONGODB_URI` is set.
-- Real X, YouTube and Meta API calls: no real credentials supplied. Retry and token-failover behavior are tested with controlled HTTP responses.
-- Hugging Face model-weight inference is not yet verified on this machine. Unit tests cover named label/probability validation, output length, background-thread execution, unavailable status, pending-post retry preservation and exclusion of already-classified/demo posts. These tests do not establish model accuracy. Run `python -m app.check_classifier` to download the real checkpoint and smoke-test inference.
+- YouTube live search/full-video ingestion verified on 2026-10-01; comments excluded. X and successful Meta ingestion remain unverified. See MODEL-VALIDATION.md.
+- Actual Hugging Face CPU inference and live YouTube text evaluation completed; see MODEL-VALIDATION.md for measured errors. Groq below-75% fallback is implemented and simulated-provider tests pass, but live Groq is blocked by the missing GROQ_API_KEY.
 - SMTP/SendGrid delivery and external webhooks: deliberately disabled in demo. Provider acceptance, delivery and receiver deduplication require an integration test before live use.
 - Commercial listening providers: normalized connector contract is implemented; a vendor-specific licensed adapter must be supplied.
 - Load testing, backup restore testing, penetration testing, and cloud deployment are not completed by the local demo. The README documents single-scheduler limits and operational requirements.
@@ -43,3 +43,9 @@ npm audit --omit=dev
 ```
 
 The Windows workspace sandbox prevented Vite's development dependency optimizer from traversing parent directories. The local handoff therefore serves the successfully built production bundle using `npm run preview -- --port 5173`; this still proxies `/api` to port 8000. Docker uses the Nginx production server. The source remains usable with the normal Vite development command outside that sandbox.
+
+## 2026-10-01 hybrid verification
+
+28 backend tests passed, 1 optional real-Mongo test skipped; production frontend build and dependency consistency check passed. Actual live Mongo aggregation, YouTube-only ingestion, login/feed/exports checked. See MODEL-VALIDATION.md for the accuracy limitations and current local ports.
+
+The later title-only update was rechecked: descriptions/comments are excluded, live Groq `qwen/qwen3.8-27b` access passed, 30 active videos reached 0 pending (4 HF, 26 Groq), the 28-test suite passed, and the frontend production build passed.

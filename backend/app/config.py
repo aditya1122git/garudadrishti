@@ -5,6 +5,13 @@ from cryptography.fernet import Fernet
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import model_validator
 
+DEFAULT_APIFY_ACTORS = {
+    'facebook': 'apify~facebook-search-scraper',
+    'instagram': 'data-slayer~instagram-keyword-posts-scraper',
+    'x': 'apidojo~tweet-scraper',
+    'news': 'easyapi~google-news-scraper',
+}
+
 
 class Config(BaseSettings):
     model_config = SettingsConfigDict(env_file=(Path(__file__).resolve().parents[2] / '.env', Path(__file__).resolve().parents[1] / '.env'), extra='ignore')
@@ -14,7 +21,7 @@ class Config(BaseSettings):
     demo_in_memory: bool = False
     jwt_secret: str = ''
     encryption_key: str = ''
-    bootstrap_email: str = 'admin@jannetra.local'
+    bootstrap_email: str = ''
     bootstrap_password: str = ''
     hf_model: str = 'cardiffnlp/twitter-xlm-roberta-base-sentiment'
     hf_revision: str = 'f2f1202b1bdeb07342385c3f807f9c07cd8f5cf8'
@@ -25,18 +32,33 @@ class Config(BaseSettings):
     hf_max_length: int = 256
     hf_cpu_threads: int = 2
     hf_local_files_only: bool = False
+    groq_api_key: str = ''
+    groq_model: str = 'qwen/qwen3.8-27b'
+    hf_confidence_threshold: float = 0.75
+    groq_concurrency: int = 2
+    enabled_platforms: str = 'facebook,instagram,x,youtube,news'
+    apify_api_token: str = ''
+    apify_facebook_actor_id: str = ''
+    apify_instagram_actor_id: str = ''
+    apify_x_actor_id: str = ''
+    apify_news_actor_id: str = ''
+    apify_facebook_input_json: str = ''
+    apify_instagram_input_json: str = ''
+    apify_x_input_json: str = ''
+    apify_news_input_json: str = ''
+    apify_max_items: int = 50
+    apify_run_timeout_seconds: int = 240
     youtube_api_key: str = ''
-    x_bearer_token: str = ''
-    meta_access_token: str = ''
-    meta_facebook_page_id: str = ''
-    meta_instagram_account_id: str = ''
-    meta_graph_version: str = 'v23.0'
+    youtube_initial_lookback_days: int = 7
+    youtube_terms_per_query: int = 4
     smtp_host: str = ''
     smtp_port: int = 587
     smtp_username: str = ''
     smtp_password: str = ''
     smtp_from: str = ''
     sendgrid_api_key: str = ''
+    telegram_bot_token: str = ''
+    telegram_chat_id: str = ''
     outbound_allowed_hosts: str = ''
     allowed_origins: str = 'http://localhost:5173,http://localhost:8080'
     reporting_timezone: str = 'Asia/Kolkata'
@@ -50,17 +72,39 @@ class Config(BaseSettings):
         if self.seed_mock_data:
             self.jwt_secret = self.jwt_secret or token_urlsafe(48)
             self.encryption_key = self.encryption_key or Fernet.generate_key().decode()
-            self.bootstrap_password = self.bootstrap_password or 'JanNetra-Demo-2026!'
-        if len(self.jwt_secret) < 32 or not self.encryption_key or len(self.bootstrap_password) < 14:
-            raise ValueError('Set JWT_SECRET (32+ chars), ENCRYPTION_KEY (Fernet), BOOTSTRAP_PASSWORD (14+ chars)')
-        if len(self.bootstrap_password.encode()) > 72:
-            raise ValueError('BOOTSTRAP_PASSWORD must be at most 72 UTF-8 bytes')
+        if len(self.jwt_secret) < 32 or not self.encryption_key:
+            raise ValueError('Set JWT_SECRET (32+ chars) and ENCRYPTION_KEY (Fernet)')
         self.bootstrap_email = self.bootstrap_email.strip().lower()
+        if self.bootstrap_email or self.bootstrap_password:
+            if '@' not in self.bootstrap_email:
+                raise ValueError('BOOTSTRAP_EMAIL must be a valid administrator email')
+            if len(self.bootstrap_password) < 14:
+                raise ValueError('BOOTSTRAP_PASSWORD must contain at least 14 characters')
+            if len(self.bootstrap_password.encode()) > 72:
+                raise ValueError('BOOTSTRAP_PASSWORD must be at most 72 UTF-8 bytes')
+        self.telegram_bot_token = self.telegram_bot_token.strip()
+        self.telegram_chat_id = self.telegram_chat_id.strip()
+        if bool(self.telegram_bot_token) != bool(self.telegram_chat_id):
+            raise ValueError('Set both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, or leave both empty')
         Fernet(self.encryption_key.encode())
         if not 1 <= self.hf_batch_size <= 32 or not 16 <= self.hf_max_length <= 512:
             raise ValueError('HF_BATCH_SIZE must be 1..32 and HF_MAX_LENGTH must be 16..512')
         if not 1 <= self.hf_cpu_threads <= 32:
             raise ValueError('HF_CPU_THREADS must be 1..32')
+        if not 0 <= self.hf_confidence_threshold <= 1 or not 1 <= self.groq_concurrency <= 8:
+            raise ValueError('Invalid classifier threshold/concurrency')
+        if not 1 <= self.youtube_initial_lookback_days <= 30 or not 1 <= self.youtube_terms_per_query <= 5:
+            raise ValueError('Invalid YouTube search coverage settings')
+        if set(self.enabled_platforms.split(',')) - {'facebook', 'instagram', 'x', 'youtube', 'news'}:
+            raise ValueError('Invalid ENABLED_PLATFORMS')
+        if not 1 <= self.apify_max_items <= 1000 or not 30 <= self.apify_run_timeout_seconds <= 300:
+            raise ValueError('Invalid Apify run limits')
+        # A single token is enough for the standard setup. Explicit environment
+        # values remain available when an operator wants to swap an Actor.
+        for platform, actor_id in DEFAULT_APIFY_ACTORS.items():
+            field = f'apify_{platform}_actor_id'
+            if not getattr(self, field).strip():
+                setattr(self, field, actor_id)
         if self.hf_device not in ('cpu', 'cuda', 'mps'):
             raise ValueError('HF_DEVICE must be cpu, cuda, or mps')
         if not self.hf_model.strip() or not self.hf_revision.strip():

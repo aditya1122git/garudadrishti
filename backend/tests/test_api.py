@@ -29,11 +29,11 @@ def test_overview_math_and_demo_isolation(client, auth):
     data = client.get('/api/overview', headers=auth).json()
     totals = data['today']
     assert data['demo'] is True
-    assert data['classifier']['provider'] == 'Hugging Face (local)'
+    assert data['classifier']['provider'] == 'Hugging Face + Groq fallback'
     assert data['classifier']['status'] == 'demo'
     assert data['classifier']['model'] == 'cardiffnlp/twitter-xlm-roberta-base-sentiment'
     assert totals['total_count'] == 1650
-    assert sum(totals[k + '_count'] for k in ['positive', 'negative', 'neutral']) == totals['total_count']
+    assert sum(totals[k + '_count'] for k in ['positive', 'negative', 'neutral', 'mixed']) == totals['total_count']
     assert abs(totals['negativity_index'] - totals['negative_count'] / 1650 * 100) < .1
     assert len(data['trend']) == 30
     assert {p['platform'] for p in data['platform_totals']} == {'x', 'youtube'}
