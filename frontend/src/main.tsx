@@ -12,7 +12,7 @@ import {
   Pie,
   Cell,
 } from "recharts";
-import { Eye, LayoutDashboard, Radio, Settings, Download, Search, ArrowUpRight, TriangleAlert, ChevronRight, RefreshCw, LogOut, ShieldCheck, CalendarDays, Activity, Check, Close, Bell, Menu , PlatformIcon } from "./icons";
+import { Eye, EyeSlash, LayoutDashboard, Radio, Settings, Download, Search, ArrowUpRight, TriangleAlert, ChevronRight, RefreshCw, LogOut, ShieldCheck, CalendarDays, Activity, Check, Close, Bell, Menu , PlatformIcon } from "./icons";
 import "bootstrap/dist/css/bootstrap.min.css";
 // @ts-ignore: CSS is handled by the bundler and has no TypeScript declarations.
 import "./style.css";
@@ -130,12 +130,33 @@ async function json(path: string, options: RequestInit = {}) {
   return (await api(path, options)).json();
 }
 
+const GlobalLoadingContext = React.createContext<
+  (message?: string) => () => void
+>(() => () => undefined);
+
+function GlobalLoader({ message }: { message: string }) {
+  return (
+    <div className="global-loader" role="status" aria-live="polite" aria-label={message}>
+      <div className="global-loader-card">
+        <span className="global-loader-spinner" aria-hidden="true" />
+        <strong>{message}</strong>
+        <span className="global-loader-dots" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [session, setSession] = useState<{
       role: string;
       email: string;
     } | null>(null),
     [error, setError] = useState(""),
+    [showPassword, setShowPassword] = useState(false),
     [loginBusy, setLoginBusy] = useState(false);
   async function login(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -178,14 +199,25 @@ function App() {
             required
             autoComplete="username"
           />
-          <input className="form-control"
-            aria-label="Password"
-            placeholder="Password"
-            name="password"
-            type="password"
-            required
-            autoComplete="current-password"
-          />
+          <div className="password-field">
+            <input className="form-control"
+              aria-label="Password"
+              placeholder="Password"
+              name="password"
+              type={showPassword ? "text" : "password"}
+              required
+              autoComplete="current-password"
+            />
+            <button
+              type="button"
+              className="password-toggle"
+              aria-label={showPassword ? "Hide password" : "Show password"}
+              aria-pressed={showPassword}
+              onClick={() => setShowPassword((visible) => !visible)}
+            >
+              {showPassword ? <EyeSlash size={18} /> : <Eye size={18} />}
+            </button>
+          </div>
           {error && (
             <p role="alert" className="error">
               {error}
@@ -223,24 +255,40 @@ function Workspace({
     [revision, setRevision] = useState(0),
     [report, setReport] = useState(false),
     [detail, setDetail] = useState<Alert | null>(null),
-    [mobile, setMobile] = useState(false);
+    [mobile, setMobile] = useState(false),
+    [loadingTasks, setLoadingTasks] = useState(0),
+    [loadingMessage, setLoadingMessage] = useState("Loading…");
+  const beginLoading = React.useCallback((message = "Loading…") => {
+    let finished = false;
+    setLoadingMessage(message);
+    setLoadingTasks((count) => count + 1);
+    return () => {
+      if (finished) return;
+      finished = true;
+      setLoadingTasks((count) => Math.max(0, count - 1));
+    };
+  }, []);
   useEffect(() => {
     let active = true;
+    const finishLoading = beginLoading("Loading dashboard data…");
     setError("");
     json("/overview" + (platform ? "?platform=" + platform : ""))
       .then((d) => {
         if (active) setData(d);
       })
-      .catch((e) => active && setError(e.message));
+      .catch((e) => active && setError(e.message))
+      .finally(finishLoading);
     return () => {
       active = false;
+      finishLoading();
     };
-  }, [platform, revision]);
+  }, [platform, revision, beginLoading]);
   useEffect(() => {
     const t = setInterval(() => setRevision((x) => x + 1), 60000);
     return () => clearInterval(t);
   }, []);
   async function refresh() {
+    const finishLoading = beginLoading("Refreshing monitoring data…");
     setBusy(true);
     try {
       if (session.role === "admin") await json("/sync", { method: "POST" });
@@ -249,6 +297,7 @@ function Workspace({
       setError((e as Error).message);
     } finally {
       setBusy(false);
+      finishLoading();
     }
   }
   const active = data?.alerts.find((a) => a.date === data.date),
@@ -265,7 +314,9 @@ function Workspace({
     ["settings", "Settings", Settings],
   ] as const;
   return (
+    <GlobalLoadingContext.Provider value={beginLoading}>
     <div className="shell">
+      {loadingTasks > 0 && <GlobalLoader message={loadingMessage} />}
       <header className={mobile ? "app-navbar open" : "app-navbar"}>
         <div className="navbar-inner">
           <div className="navbar-brand">
@@ -911,6 +962,7 @@ function Workspace({
         </Modal>
       )}
     </div>
+    </GlobalLoadingContext.Provider>
   );
 }
 
@@ -952,6 +1004,7 @@ function Feed({
   compact: boolean;
   onExpand: () => void;
 }) {
+  const beginLoading = React.useContext(GlobalLoadingContext);
   const [q, setQ] = useState(""),
     [term, setTerm] = useState(""),
     [sentiment, setSentiment] = useState(""),
@@ -959,6 +1012,7 @@ function Feed({
     [day, setDay] = useState(defaultDay),
     [page, setPage] = useState(1),
     [posts, setPosts] = useState<{ items: Post[]; total: number } | null>(null),
+    [loading, setLoading] = useState(true),
     [error, setError] = useState("");
   useEffect(() => {
     const t = setTimeout(() => setTerm(q), 300);
@@ -972,25 +1026,36 @@ function Feed({
   useEffect(() => setPage(1), [platform, term, sentiment, sort, day]);
   useEffect(() => {
     let active = true;
+    const finishLoading = beginLoading("Loading conversations…");
     setError("");
+    setLoading(true);
     const p = new URLSearchParams({ q: term, sort, page: String(page) });
     if (platform) p.set("platform", platform);
     if (sentiment) p.set("sentiment", sentiment);
     if (day) p.set("day", day);
     json("/posts?" + p)
       .then((p) => active && setPosts(p))
-      .catch((e) => active && setError(e.message));
+      .catch((e) => active && setError(e.message))
+      .finally(() => {
+        if (active) setLoading(false);
+        finishLoading();
+      });
     return () => {
       active = false;
+      finishLoading();
     };
-  }, [platform, term, sentiment, sort, page, revision, day]);
+  }, [platform, term, sentiment, sort, page, revision, day, beginLoading]);
   return (
     <section className="panel feed">
       <div className="panel-title">
         <div>
           <h2>{compact ? "Conversation watch" : "Recent posts"}</h2>
           <p>
-            {posts ? num(posts.total) + " matching posts" : "Loading posts…"}
+            {loading
+              ? "Loading conversations…"
+              : posts
+                ? num(posts.total) + " matching posts"
+                : "Posts unavailable"}
           </p>
         </div>
         {compact && (
@@ -1168,6 +1233,7 @@ function Modal({
   );
 }
 function ReportModal({ close }: { close: () => void }) {
+  const beginLoading = React.useContext(GlobalLoadingContext);
   const [period, setPeriod] = useState("daily"),
     [format, setFormat] = useState("pdf"),
     [busy, setBusy] = useState(false),
@@ -1198,6 +1264,7 @@ function ReportModal({ close }: { close: () => void }) {
         className="btn btn-primary primary"
         disabled={busy}
         onClick={async () => {
+          const finishLoading = beginLoading("Preparing your report…");
           setBusy(true);
           try {
             const response = await api(
@@ -1214,6 +1281,7 @@ function ReportModal({ close }: { close: () => void }) {
             setError((e as Error).message);
           } finally {
             setBusy(false);
+            finishLoading();
           }
         }}
       >
@@ -1231,6 +1299,7 @@ function SettingsPanel({
   admin: boolean;
   onSaved: () => void;
 }) {
+  const beginLoading = React.useContext(GlobalLoadingContext);
   const [prefs, setPrefs] = useState<any>(null),
     [terms, setTerms] = useState(""),
     [message, setMessage] = useState(""),
@@ -1238,6 +1307,7 @@ function SettingsPanel({
     [saving, setSaving] = useState(false),
     [credential, setCredential] = useState<any>(null);
   useEffect(() => {
+    const finishLoading = beginLoading("Loading workspace settings…");
     json("/settings")
       .then((p) => {
         setPrefs(p);
@@ -1248,12 +1318,15 @@ function SettingsPanel({
             .join("\n"),
         );
       })
-      .catch((e) => setError(e.message));
-  }, []);
+      .catch((e) => setError(e.message))
+      .finally(finishLoading);
+    return finishLoading;
+  }, [beginLoading]);
   if (!prefs)
     return <div className="panel empty">{error || "Loading settings…"}</div>;
   async function save(e: React.FormEvent) {
     e.preventDefault();
+    const finishLoading = beginLoading("Saving workspace settings…");
     setSaving(true);
     setError("");
     setMessage("");
@@ -1277,6 +1350,7 @@ function SettingsPanel({
       setError((e as Error).message);
     } finally {
       setSaving(false);
+      finishLoading();
     }
   }
   return (
@@ -1449,6 +1523,7 @@ function SettingsPanel({
           <form
             onSubmit={async (e) => {
               e.preventDefault();
+              const finishLoading = beginLoading("Saving API connection…");
               setError("");
               try {
                 await json("/credentials", {
@@ -1460,6 +1535,8 @@ function SettingsPanel({
                 setMessage("Connection saved. Run Refresh to verify access.");
               } catch (e) {
                 setError((e as Error).message);
+              } finally {
+                finishLoading();
               }
             }}
           >

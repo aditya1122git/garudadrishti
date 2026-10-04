@@ -12,7 +12,7 @@ docker compose up --build
 
 Open http://localhost:8080 and sign in with the administrator email and password you configured. The login form never exposes or prefills credentials. Compose defaults to live mode (`SEED_MOCK_DATA=false`).
 
-The API and MongoDB have no published host ports. The frontend binds to loopback. MongoDB uses a persistent volume and an internal network. Its bundled development instance has no authentication; use an authenticated Atlas cluster or secured MongoDB deployment for production.
+The API and MongoDB have no published host ports. The frontend publishes `PUBLIC_PORT` (8080 by default) on all host interfaces and securely proxies `/api/*` to FastAPI over the private Docker network. MongoDB uses a persistent volume and an internal network. Its bundled development instance has no authentication; use an authenticated Atlas cluster or secured MongoDB deployment for production.
 
 ## Local development without Docker
 

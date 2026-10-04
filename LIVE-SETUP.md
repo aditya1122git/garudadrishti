@@ -34,6 +34,7 @@ Hostinger clones the repository, so the ignored local `.env` file is not present
 - `BOOTSTRAP_EMAIL` and `BOOTSTRAP_PASSWORD` - required on the first deployment because the new Mongo volume has no users; password must be 14-72 UTF-8 bytes
 - `YOUTUBE_API_KEY`, `APIFY_API_TOKEN`, `GROQ_API_KEY`
 - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` when Telegram alerts are enabled
+- `PUBLIC_PORT=8080` to use `http://SERVER_IP:8080`, or `PUBLIC_PORT=80` when port 80 is free
 
 Generate the two security values locally without printing application credentials:
 
@@ -43,6 +44,8 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 ```
 
 The Compose file explicitly forwards deployment environment variables to the API container. It also fails during Compose validation with a clear message when `JWT_SECRET` or `ENCRYPTION_KEY` is absent. After the first successful startup, the administrator remains in the persistent Mongo volume; `BOOTSTRAP_EMAIL` and `BOOTSTRAP_PASSWORD` can then be removed before a later redeploy.
+
+The frontend is the only public container. It proxies all `/api/*` requests to FastAPI on the private Docker network, so the backend is checked at `http://SERVER_IP:PUBLIC_PORT/api/health`; a separate public API port is neither required nor exposed. When using port 8080, allow inbound TCP 8080 in **Hostinger hPanel -> VPS -> Firewall**. A timeout means the host port is blocked or the deployment still uses the old loopback-only Compose mapping. A working health request returns `{"status":"ok","demo":false}`.
 
 ## YouTube-only hybrid update
 

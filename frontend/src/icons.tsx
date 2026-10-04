@@ -1,6 +1,6 @@
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
-import { faEye, faTableColumns, faTowerBroadcast, faGear, faDownload, faMagnifyingGlass, faArrowUpRightFromSquare, faTriangleExclamation, faChevronRight, faArrowsRotate, faRightFromBracket, faShieldHalved, faCalendarDays, faChartLine, faCheck, faXmark, faBell, faBars, faNewspaper } from "@fortawesome/free-solid-svg-icons";
+import { faEye, faEyeSlash, faTableColumns, faTowerBroadcast, faGear, faDownload, faMagnifyingGlass, faArrowUpRightFromSquare, faTriangleExclamation, faChevronRight, faArrowsRotate, faRightFromBracket, faShieldHalved, faCalendarDays, faChartLine, faCheck, faXmark, faBell, faBars, faNewspaper } from "@fortawesome/free-solid-svg-icons";
 import { faFacebookF, faInstagram, faYoutube, faXTwitter } from "@fortawesome/free-brands-svg-icons";
 type Props = { size?: number; className?: string };
 function iconComponent(icon: IconDefinition) {
@@ -9,6 +9,7 @@ function iconComponent(icon: IconDefinition) {
   };
 }
 export const Eye = iconComponent(faEye);
+export const EyeSlash = iconComponent(faEyeSlash);
 export const LayoutDashboard = iconComponent(faTableColumns);
 export const Radio = iconComponent(faTowerBroadcast);
 export const Settings = iconComponent(faGear);
