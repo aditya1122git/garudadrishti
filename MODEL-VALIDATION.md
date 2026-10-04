@@ -5,8 +5,8 @@ Checked 2026-10-01 on the local CPU runtime. These are functional checks and sma
 ## Working behavior
 
 - YouTube official search plus videos.list: video title only. No description, comments, or commentThreads content is classified or stored in the active scope.
-- Hugging Face confidence >= 0.75 is accepted. Scores below 0.75 go to Groq. The exact 0.75 boundary is covered by an automated test.
-- Groq missing/failing: low-confidence items retain sentiment=null, show Awaiting Groq, and are excluded from classified counts. High-confidence HF results still save.
+- Hugging Face confidence below 0.75 goes to Groq. High-confidence titles also go to Groq when target-attribution risk is detected, including target-only campaign hashtags, opponent references and attributed criticism. The exact 0.75 boundary is covered by an automated test.
+- Groq missing/failing: verification-required items retain sentiment=null, show Awaiting Groq, and are excluded from classified counts. Safe high-confidence HF results still save.
 - Final results retain the model used, HF confidence and review flag. Low-confidence Groq output is flagged for review.
 - Groq JSON validates count and IDs in order, retries malformed batches individually, retries transient transport/rate errors with backoff and limits concurrency.
 
@@ -33,7 +33,7 @@ Political cases: 11/12 HF labels matched authored expectations. Of 6 results acc
 | वाह प्रशांत किशोर! फिर एक और खोखला वादा। जनता को बेवकूफ समझ रखा है? | negative | negative | 80.0% | HF accepted |
 | Jan Suraj Party announces candidate list for the upcoming election. | neutral | neutral | 65.1% | Groq pending |
 
-**Observed failure:** HF assigns about 90% negative confidence to a sentence where Prashant Kishore criticizes government policies. The expected stance toward Kishore is neutral. A 75% gate cannot catch confidently wrong target attribution. The requested confidence-only routing is implemented; broad political accuracy is not established.
+**Corrected target-attribution case:** HF can assign high negative confidence when Prashant Kishore criticizes government policies or when a Jan Suraaj campaign title sarcastically attacks an opponent. Schema v3 routes these attribution-risk titles to the target-aware verifier regardless of HF confidence. The live screenshot case `BJP à¤•à¥‹ à¤µà¥‹à¤Ÿ à¤•à¥€à¤œà¤¿à¤ à¤›à¤¤ à¤¸à¥‡ à¤ªà¤¾à¤¨à¥€ à¤†à¤à¤—à¤¾ #prashantkishor #jansuraj` returned positive at 0.95 confidence because the negative language targets BJP, while the campaign context supports Jan Suraaj. Broad political accuracy is still not established.
 
 HF truncates inputs to configured HF_MAX_LENGTH tokens (256 by default) and flags truncation in the reason. Groq fallback receives only the title. Hinglish, sarcasm, clickbait and ambiguous short titles need representative human review.
 

@@ -82,10 +82,11 @@ async def lifespan(app):
         # The active YouTube scope is deliberately title-only.
         await db.posts.update_many({'platform': 'youtube', 'content_scope': 'youtube-title-only-v2'},
                                    {'$unset': {'description': ''}})
-        # Taxonomy v2 adds "mixed". Reclassify each active record exactly once so
-        # historical charts use the same four-label definition as new ingestion.
+    if not c.seed_mock_data:
+        # Schema v3 adds target-attribution verification for opponent criticism.
+        # Reclassify active records from every enabled source exactly once.
         await db.posts.update_many({**POST_SCOPE, 'demo': False, 'sentiment': {'$ne': None},
-                                    'sentiment_schema_version': {'$ne': 2}},
+                                    'sentiment_schema_version': {'$ne': 3}},
                                    {'$set': {'sentiment': None, 'classification_status': 'pending'},
                                     '$unset': {'classification_error': '', 'hf_candidate': ''}})
     if c.seed_mock_data:

@@ -75,6 +75,35 @@ _NEGATIVE_SIGNALS = [
     r'निराश', r'गद्दार', r'विरोध.*तीखा', r'खतरनाक',
 ]
 
+# HF predicts the overall emotional tone, while JanNetra needs stance toward
+# the tracked entities. These patterns identify titles where a high-confidence
+# general-sentiment label still needs target attribution by the Groq verifier.
+_TARGET_PATTERN = re.compile(
+    r'jan\s*sura(?:j|aj)|à¤œà¤¨\s*à¤¸à¥à¤°à¤¾à¤œ|prashant\s*kishor(?:e)?|'
+    r'à¤ªà¥à¤°à¤¶à¤¾à¤‚à¤¤\s*à¤•à¤¿à¤¶à¥‹à¤°|(?<![a-z])pk(?![a-z])', re.IGNORECASE,
+)
+_TARGET_HASHTAG_PATTERN = re.compile(
+    r'#(?:jan_?sura(?:j|aj)|prashant_?kishor(?:e)?|à¤œà¤¨à¤¸à¥à¤°à¤¾à¤œ|à¤ªà¥à¤°à¤¶à¤¾à¤‚à¤¤à¤•à¤¿à¤¶à¥‹à¤°)', re.IGNORECASE,
+)
+_ATTRIBUTION_RISK_PATTERN = re.compile(
+    r'\b(?:said|says|blamed|accused|attacked|criticised|criticized|against|vs\.?)\b|'
+    r'à¤•à¤¹à¤¾|à¤¬à¥‹à¤²à¥‡|à¤†à¤°à¥‹à¤ª|à¤¹à¤®à¤²à¤¾|à¤¨à¤¿à¤¶à¤¾à¤¨à¤¾|à¤µà¤¿à¤°à¥‹à¤§|à¤–à¤¿à¤²à¤¾à¤«|'
+    r'\b(?:bjp|rjd|jdu|jd\(u\)|congress|nda|modi|nitish|lalu|tejashwi)\b|'
+    r'à¤­à¤¾à¤œà¤ªà¤¾|à¤•à¤¾à¤‚à¤—à¥à¤°à¥‡à¤¸|à¤¨à¥€à¤¤à¥€à¤¶|à¤²à¤¾à¤²à¥‚|à¤¤à¥‡à¤œà¤¸à¥à¤µà¥€', re.IGNORECASE,
+)
+
+
+def needs_target_verification(text: str, result: Result) -> bool:
+    """Detect target-attribution risk that confidence cannot measure."""
+    if result.sentiment == 'neutral' or not _TARGET_PATTERN.search(text):
+        return False
+    without_hashtags = re.sub(r'#\S+', '', text)
+    target_only_in_hashtag = (
+        bool(_TARGET_HASHTAG_PATTERN.search(text))
+        and not _TARGET_PATTERN.search(without_hashtags)
+    )
+    return target_only_in_hashtag or bool(_ATTRIBUTION_RISK_PATTERN.search(without_hashtags))
+
 def _political_override(text_clean, label, confidence):
     """Return corrected (label, confidence, note) for low-confidence predictions."""
     if confidence >= 0.65:
@@ -183,14 +212,15 @@ class Classifier:
             for result in results:
                 result.model_used = self.provenance
                 result.hf_confidence = result.confidence
-            low = [i for i, result in enumerate(results)
-                   if result.confidence < self.settings.hf_confidence_threshold]
-            if low:
+            verify = [i for i, result in enumerate(results)
+                      if result.confidence < self.settings.hf_confidence_threshold
+                      or needs_target_verification(texts[i], result)]
+            if verify:
                 from .groq_fallback import GroqFallback
                 if self._groq is None:
                     self._groq = GroqFallback(self.settings)
-                refined = await self._groq.classify([texts[i] for i in low])
-                for index, fallback in zip(low, refined, strict=True):
+                refined = await self._groq.classify([texts[i] for i in verify])
+                for index, fallback in zip(verify, refined, strict=True):
                     if fallback is None:
                         results[index].pending = True
                         results[index].review_required = True

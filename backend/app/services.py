@@ -248,16 +248,19 @@ async def sync(db, client):
                                 'classification_error': 'Groq unavailable; low-confidence result excluded from totals'}})
                             continue
                         notification = ({'status': 'pending', 'created_at': now()}
-                                        if r.sentiment == 'negative' else None)
+                                        if r.sentiment == 'negative' and not p.get('telegram_notification') else None)
                         update_fields = {'sentiment': dict(
                             label=r.sentiment, confidence=r.confidence, reason=r.reason,
                             model_used=r.model_used or engine.provenance, hf_confidence=r.hf_confidence,
                             review_required=r.review_required, classified_at=now()), 'classification_status': 'classified',
-                            'sentiment_schema_version': 2}
+                            'sentiment_schema_version': 3}
                         if notification:
                             update_fields['telegram_notification'] = notification
+                        unset_fields = {'classification_error': '', 'hf_candidate': ''}
+                        if r.sentiment != 'negative':
+                            unset_fields['telegram_notification'] = ''
                         await db.posts.update_one({'_id': p['_id'], 'sentiment': None}, {'$set': update_fields,
-                            '$unset': {'classification_error': '', 'hf_candidate': ''}})
+                            '$unset': unset_fields})
             except Exception:
                 # Classifier exposes failure state; pending posts are retried next sync.
                 pass

@@ -27,6 +27,27 @@ async def test_exact_threshold_routes_only_below_75(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_high_confidence_overall_tone_gets_target_stance_verification(monkeypatch):
+    settings = SimpleNamespace(hf_confidence_threshold=.75, hf_model='hf', hf_revision='rev', groq_model='groq')
+    engine = Classifier(settings)
+    title = 'BJP à¤•à¥‹ à¤µà¥‹à¤Ÿ à¤•à¥€à¤œà¤¿à¤ à¤›à¤¤ à¤¸à¥‡ à¤ªà¤¾à¤¨à¥€ à¤†à¤à¤—à¤¾ #youth #prashantkishor #jansuraj #bjp #modi'
+    monkeypatch.setattr(engine, '_run', lambda texts: [
+        Result(sentiment='negative', confidence=.85, reason='Overall negative tone')])
+
+    class Fallback:
+        async def classify(self, texts):
+            assert texts == [title]
+            return [Result(sentiment='positive', confidence=.92,
+                           reason='Sarcastic criticism of BJP in Jan Suraaj campaign context')]
+
+    engine._groq = Fallback()
+    result = (await engine.classify([title]))[0]
+    assert result.sentiment == 'positive'
+    assert result.model_used == 'groq/groq'
+    assert result.hf_confidence == .85
+
+
+@pytest.mark.asyncio
 async def test_unavailable_fallback_keeps_high_results_and_flags_low(monkeypatch):
     settings = SimpleNamespace(hf_confidence_threshold=.75, hf_model='hf', hf_revision='rev',
                                groq_model='groq', groq_api_key='', groq_concurrency=2)
