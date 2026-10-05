@@ -73,3 +73,20 @@ def test_no_secret_import_or_demo_credential_storage(client, auth):
     assert response.status_code == 409
     assert 'encrypted_api_key' not in client.get('/api/settings', headers=auth).text
     assert client.post('/api/import', headers=auth).status_code == 404
+
+
+def test_user_can_update_profile_email_name_and_password(client, auth):
+    original = {'email': 'profile-user@example.org', 'password': 'Profile-Old-Password!', 'role': 'viewer'}
+    assert client.post('/api/users', headers=auth, json=original).status_code == 201
+    login = client.post('/api/auth/token', data={'username': original['email'], 'password': original['password']})
+    token = {'Authorization': 'Bearer ' + login.json()['access_token']}
+    updated = {
+        'name': 'Campaign Analyst', 'email': 'analyst-profile@example.org',
+        'current_password': original['password'], 'new_password': 'Profile-New-Password!',
+    }
+    response = client.put('/api/profile', headers=token, json=updated)
+    assert response.status_code == 200
+    assert response.json()['name'] == 'Campaign Analyst'
+    assert client.get('/api/profile', headers=token).json()['email'] == updated['email']
+    assert client.post('/api/auth/token', data={'username': original['email'], 'password': original['password']}).status_code == 401
+    assert client.post('/api/auth/token', data={'username': updated['email'], 'password': updated['new_password']}).status_code == 200

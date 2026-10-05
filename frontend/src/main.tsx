@@ -25,6 +25,7 @@ type Source = {
   last_synced_at: string | null;
   error?: string;
 };
+type Session = { role: string; email: string; name: string };
 type Rollup = {
   date: string;
   platform?: string;
@@ -159,10 +160,7 @@ function GlobalLoader({ message }: { message: string }) {
 }
 
 function App() {
-  const [session, setSession] = useState<{
-      role: string;
-      email: string;
-    } | null>(null),
+  const [session, setSession] = useState<Session | null>(null),
     [error, setError] = useState(""),
     [showPassword, setShowPassword] = useState(false),
     [loginBusy, setLoginBusy] = useState(false);
@@ -240,6 +238,7 @@ function App() {
   return (
     <Workspace
       session={session}
+      onSessionChange={setSession}
       logout={() => {
         bearer = "";
         setSession(null);
@@ -250,9 +249,11 @@ function App() {
 
 function Workspace({
   session,
+  onSessionChange,
   logout,
 }: {
-  session: { role: string; email: string };
+  session: Session;
+  onSessionChange: (session: Session) => void;
   logout: () => void;
 }) {
   const [view, setView] = useState("overview"),
@@ -355,11 +356,18 @@ function Workspace({
             ))}
           </nav>
           <div className="navbar-account">
-            <span className="avatar">{session.email[0].toUpperCase()}</span>
-            <div>
-              <strong>{session.role === "admin" ? "Administrator" : "Viewer"}</strong>
-              <small>{session.email}</small>
-            </div>
+            <button
+              className="account-profile-button"
+              title="Open profile"
+              aria-label="Open profile"
+              onClick={() => navigate("profile")}
+            >
+              <span className="avatar">{(session.name || session.email)[0].toUpperCase()}</span>
+              <span className="account-copy">
+                <strong>{session.name || (session.role === "admin" ? "Administrator" : "Viewer")}</strong>
+                <small>{session.email}</small>
+              </span>
+            </button>
             <button title="Sign out" aria-label="Sign out" onClick={logout}>
               <LogOut size={18} />
             </button>
@@ -378,7 +386,9 @@ function Workspace({
                     ? "Conversation feed"
                     : view === "alerts"
                       ? "Alert centre"
-                      : "Workspace settings"}
+                      : view === "profile"
+                        ? session.role === "admin" ? "Administrator profile" : "User profile"
+                        : "Workspace settings"}
               </h1>
               <p>
                 {view === "overview"
@@ -387,7 +397,9 @@ function Workspace({
                     ? "Explore the posts behind the numbers."
                     : view === "alerts"
                       ? "Threshold breaches, evidence and notification status."
-                      : "Manage the terms, sources and thresholds you monitor."}
+                      : view === "profile"
+                        ? "Update your account details and password."
+                        : "Manage the terms and sources you monitor."}
               </p>
             </div>
             <div className="heading-actions">
@@ -428,7 +440,9 @@ function Workspace({
           ) : (
             data && (
               <>
-                {view === "settings" ? (
+                {view === "profile" ? (
+                  <ProfilePanel session={session} onSaved={onSessionChange} />
+                ) : view === "settings" ? (
                   <SettingsPanel
                     admin={session.role === "admin"}
                     onSaved={() => setRevision((x) => x + 1)}
@@ -453,10 +467,8 @@ function Workspace({
                               exceeded
                             </strong>
                             <span>
-                              {num(a.negative_count)} negative posts · threshold{" "}
-                              {num(a.threshold)} ·{" "}
-                              {a.notified_channels.join(", ") ||
-                                "Delivery pending / channels disabled"}
+                              {num(a.negative_count)} negative posts / threshold{" "}
+                              {num(a.threshold)}
                             </span>
                           </div>
                           <ChevronRight />
@@ -1296,6 +1308,126 @@ function ReportModal({ close }: { close: () => void }) {
   );
 }
 
+function ProfilePanel({
+  session,
+  onSaved,
+}: {
+  session: Session;
+  onSaved: (session: Session) => void;
+}) {
+  const beginLoading = React.useContext(GlobalLoadingContext);
+  const [profile, setProfile] = useState({ name: session.name, email: session.email });
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPasswords, setShowPasswords] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const finishLoading = beginLoading("Loading your profileâ€¦");
+    json("/profile")
+      .then((value) => setProfile({ name: value.name, email: value.email }))
+      .catch((e) => setError(e.message))
+      .finally(finishLoading);
+    return finishLoading;
+  }, [beginLoading]);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    setMessage("");
+    if (newPassword !== confirmPassword) {
+      setError("New password and confirmation do not match.");
+      return;
+    }
+    const finishLoading = beginLoading("Updating your profileâ€¦");
+    setSaving(true);
+    try {
+      const result = await json("/profile", {
+        method: "PUT",
+        body: JSON.stringify({
+          name: profile.name,
+          email: profile.email,
+          current_password: currentPassword,
+          new_password: newPassword,
+        }),
+      });
+      onSaved({ role: result.role, name: result.name, email: result.email });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setMessage("Profile updated successfully.");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+      finishLoading();
+    }
+  }
+
+  return (
+    <section className="panel profile-panel">
+      <div className="profile-header">
+        <span className="profile-avatar">{(profile.name || profile.email)[0]?.toUpperCase()}</span>
+        <div>
+          <h2>{profile.name || "Administrator"}</h2>
+          <p>{session.role === "admin" ? "Administrator account" : "Viewer account"}</p>
+        </div>
+      </div>
+      <form onSubmit={save} autoComplete="off">
+        <div className="profile-fields">
+          <label>
+            Full name
+            <input className="form-control" minLength={2} maxLength={80} required
+              value={profile.name} onChange={(e) => setProfile({ ...profile, name: e.target.value })} />
+          </label>
+          <label>
+            Email address
+            <input className="form-control" type="email" required autoComplete="email"
+              value={profile.email} onChange={(e) => setProfile({ ...profile, email: e.target.value })} />
+          </label>
+        </div>
+        <div className="profile-password-heading">
+          <div><strong>Security</strong><p>Enter your current password to save profile changes.</p></div>
+          <button type="button" onClick={() => setShowPasswords((value) => !value)}>
+            {showPasswords ? <EyeSlash size={16} /> : <Eye size={16} />}
+            {showPasswords ? "Hide passwords" : "Show passwords"}
+          </button>
+        </div>
+        <div className="profile-fields profile-passwords">
+          <label>
+            Current password
+            <input className="form-control" type={showPasswords ? "text" : "password"} required
+              autoComplete="current-password" value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)} />
+          </label>
+          <label>
+            New password <small>Optional, minimum 14 characters</small>
+            <input className="form-control" type={showPasswords ? "text" : "password"}
+              minLength={newPassword ? 14 : undefined} autoComplete="new-password" value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)} />
+          </label>
+          <label>
+            Confirm new password
+            <input className="form-control" type={showPasswords ? "text" : "password"}
+              minLength={newPassword ? 14 : undefined} autoComplete="new-password" value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)} />
+          </label>
+        </div>
+        {error && <p className="error" role="alert">{error}</p>}
+        {message && <p className="success" role="status"><Check size={16} />{message}</p>}
+        <div className="profile-actions">
+          <button className="btn btn-primary primary" disabled={saving}>
+            {saving ? "Savingâ€¦" : "Save profile"}
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
 function SettingsPanel({
   admin,
   onSaved,
@@ -1338,17 +1470,10 @@ function SettingsPanel({
       await json("/settings", {
         method: "PUT",
         body: JSON.stringify({
-          threshold: Number(prefs.threshold),
           keywords: terms.split("\n").filter(Boolean),
-          email: prefs.email,
-          email_enabled: prefs.email_enabled,
-          webhook_enabled: prefs.webhook_enabled,
-          webhook_url: prefs.webhook_enabled ? prefs.webhook_url || "" : "",
         }),
       });
-      setMessage(
-        "Workspace settings saved. Threshold changes take effect on the next sync.",
-      );
+      setMessage("Tracked terms saved. Changes take effect on the next sync.");
       onSaved();
     } catch (e) {
       setError((e as Error).message);
@@ -1360,7 +1485,7 @@ function SettingsPanel({
   return (
     <>
       <form onSubmit={save} className="settings-grid" autoComplete="off">
-        <section className="panel settings-section">
+        <section className="panel settings-section tracked-terms-section">
           <div className="panel-title">
             <h2>Tracked terms</h2>
             <span>Hindi · English · Hinglish</span>
@@ -1376,73 +1501,6 @@ function SettingsPanel({
               value={terms}
               onChange={(e) => setTerms(e.target.value)}
               disabled={!admin}
-            />
-          </label>
-        </section>
-        <section className="panel settings-section">
-          <div className="panel-title">
-            <h2>Alert rules & delivery</h2>
-          </div>
-          <label>
-            Daily negative-post threshold
-            <input className="form-control"
-              type="number"
-              min={1}
-              max={10000000}
-              value={prefs.threshold}
-              onChange={(e) =>
-                setPrefs({ ...prefs, threshold: e.target.value })
-              }
-              disabled={!admin}
-            />
-          </label>
-          <p>
-            An alert fires when the count is strictly greater than this
-            threshold.
-          </p>
-          <label className="check-label">
-            <input className="form-check-input"
-              type="checkbox"
-              checked={prefs.email_enabled}
-              disabled={!admin}
-              onChange={(e) =>
-                setPrefs({ ...prefs, email_enabled: e.target.checked })
-              }
-            />
-            Email notifications
-          </label>
-          <label>
-            Recipient
-            <input className="form-control"
-              type="email"
-              value={prefs.email}
-              disabled={!admin}
-              onChange={(e) => setPrefs({ ...prefs, email: e.target.value })}
-              placeholder="analyst@example.org"
-            />
-          </label>
-          <label className="check-label">
-            <input className="form-check-input"
-              type="checkbox"
-              checked={prefs.webhook_enabled}
-              disabled={!admin}
-              onChange={(e) =>
-                setPrefs({ ...prefs, webhook_enabled: e.target.checked })
-              }
-            />
-            Webhook notifications
-          </label>
-          <label>
-            HTTPS webhook URL
-            <input className="form-control"
-              type="password"
-              value={prefs.webhook_url || ""}
-              disabled={!admin}
-              onChange={(e) =>
-                setPrefs({ ...prefs, webhook_url: e.target.value })
-              }
-              placeholder="Leave blank to keep existing endpoint"
-              autoComplete="new-password"
             />
           </label>
         </section>
@@ -1483,6 +1541,8 @@ function SettingsPanel({
                   <p>
                     {key === "youtube"
                       ? "Official Data API v3 - quota-aware schedule"
+                      : key === "news"
+                        ? "Google News RSS - automatic, no API key required"
                       : "Apify Actor - configured source monitoring"}
                   </p>
                 </div>
@@ -1492,7 +1552,7 @@ function SettingsPanel({
                     "Not connected"}
                 </span>
                 <button
-                  disabled={!admin}
+                  disabled={!admin || key === "news"}
                   onClick={() =>
                     setCredential({
                       platform: key,
@@ -1504,7 +1564,7 @@ function SettingsPanel({
                     })
                   }
                 >
-                  Configure
+                  {key === "news" ? "Automatic" : "Configure"}
                 </button>
               </div>
             );

@@ -7,14 +7,14 @@ The local `.env` is created in this project directory. Live mode is the default.
 1. **Hosting choice:** local PC, VPS, or cloud, plus available RAM and CPU/GPU. Plan initially for roughly 4 GB API memory and benchmark; the multilingual weights download is around 1.1 GB, excluding runtime dependencies. Small/free containers may not fit.
 2. **Database:** authenticated MongoDB URI (Atlas or self-hosted).
 3. **Administrator:** preferred email and a unique password. No default login is provided. JWT and encryption keys in the local `.env` must be preserved.
-4. **At least one source:** YouTube Data API v3 key or an Apify API token. JanNetra supplies default Actors and inputs for Facebook, Instagram, X and News.
+4. **At least one source:** YouTube Data API v3 key, an Apify API token for social sources, or the credential-free Google News RSS source.
 
 ## Optional sources and notifications
 
-- **Apify sources:** `APIFY_API_TOKEN` connects the four standard Actors automatically. Actor IDs and input templates in `.env` or Settings are optional advanced overrides. Apify Store Actors can incur per-result and compute charges; keep the item limit conservative.
-- **Email alerts:** recipient email and either SMTP host/port/username/password/from-address or a SendGrid key and verified sender. Enable the channel in Settings.
-- **Webhook alerts:** destination URL and its exact hostname for `OUTBOUND_ALLOWED_HOSTS`; enable it in Settings. Provider-specific Slack/Telegram formatting may require an adapter.
-- **Keywords/threshold:** confirm tracked terms and the default threshold of more than 500 negative posts per reporting day, Asia/Kolkata.
+- **Apify sources:** `APIFY_API_TOKEN` connects Facebook, Instagram and X automatically. Actor IDs and input templates in `.env` or Settings are optional advanced overrides. Apify Store Actors can incur per-result and compute charges; keep the item limit conservative.
+- **News:** Google News RSS needs no key and monitors the approved Bihar publisher list documented in the README.
+- **Telegram alerts:** set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` for immediate current-day negative-post alerts.
+- **Keywords:** confirm tracked terms in Settings. The dashboard daily threshold remains an internal 500-negative-post rule.
 - **Validation examples:** a small anonymized set of Hindi/Hinglish/English texts with analyst-agreed labels helps evaluate domain quality. This is a development evaluation exercise; the app has no manual import feature.
 
 ## Hugging Face credentials

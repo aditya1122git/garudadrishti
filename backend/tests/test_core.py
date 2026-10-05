@@ -12,7 +12,7 @@ from app.config import Config
 from app.models import now
 from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window
 from app.sentiment import Classifier
-from app.connectors import NEWS_CHANNELS, matches, apify_posts, _actor_input, ProviderError, request
+from app.connectors import NEWS_CHANNELS, matches, apify_posts, google_news_posts, _actor_input, ProviderError, request
 
 
 def test_timezone_boundary():
@@ -47,10 +47,6 @@ def test_token_only_apify_inputs_are_platform_specific():
     assert _actor_input('facebook', '', keywords, since, 20)['searchType'] == 'posts'
     assert _actor_input('instagram', '', keywords, since, 20)['searchQueries'] == keywords
     assert _actor_input('x', '', keywords, since, 20)['searchTerms'] == keywords
-    news = _actor_input('news', '', keywords, since, 20)
-    assert all(term in news['query'] for term in keywords)
-    assert all(channel in news['query'] for channel in NEWS_CHANNELS)
-    assert news['maxItems'] == 100 and news['time_period'] == 'custom'
 
 
 @pytest.mark.asyncio
@@ -183,7 +179,7 @@ async def test_alert_strict_threshold_and_idempotence():
 @pytest.mark.asyncio
 async def test_apify_sources_unconfigured_are_disconnected():
     result = await statuses(AsyncMongoMockClient().test)
-    for p in ['facebook', 'instagram', 'news']:
+    for p in ['facebook', 'instagram']:
         s = next(x for x in result if x['platform'] == p)
         assert s['source'] == 'Not connected' and s['status'] == 'disconnected'
 
@@ -226,25 +222,28 @@ async def test_apify_normalizes_serialized_facebook_author():
 
 
 @pytest.mark.asyncio
-async def test_easyapi_news_input_and_output_mapping():
+async def test_google_news_rss_input_and_output_mapping():
+    from email.utils import format_datetime
     captured = []
+    published = format_datetime(now())
     def handler(req):
-        captured.append(json.loads(req.content))
-        return httpx.Response(200, json=[{
-            'title': 'Prashant Kishore addresses Bihar rally',
-            'snippet': 'Jan Suraaj leaders shared the campaign plan.',
-            'link': 'https://news.example.org/story', 'source': 'News18 Bihar Jharkhand',
-            'date_utc': now().isoformat(),
-        }])
+        captured.append(req)
+        return httpx.Response(200, text=f'''<?xml version="1.0" encoding="UTF-8"?>
+          <rss version="2.0"><channel><item>
+          <title>Prashant Kishore addresses Bihar rally - News18 Bihar Jharkhand</title>
+          <link>https://news.google.com/rss/articles/story</link>
+          <guid>rss-story-1</guid><pubDate>{published}</pubDate>
+          <source url="https://news18.com">News18 Bihar Jharkhand</source>
+          </item></channel></rss>''')
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        rows = await apify_posts(client, 'news', {
-            'api_key': 'token', 'actor_id': 'easyapi~google-news-scraper', 'max_items': 50,
-        }, ['Jan Suraaj', 'Prashant Kishore'], now() - timedelta(days=1))
-    assert captured[0]['maxItems'] == 100
-    assert all(channel in captured[0]['query'] for channel in NEWS_CHANNELS)
+        rows = await google_news_posts(client, ['Jan Suraaj', 'Prashant Kishore'], now() - timedelta(days=1))
+    assert len(captured) == len(NEWS_CHANNELS)
+    assert all(req.url.host == 'news.google.com' for req in captured)
+    assert all(req.url.params['ceid'] == 'IN:hi' for req in captured)
     assert rows[0]['author'] == 'News18 Bihar Jharkhand'
-    assert rows[0]['url'] == 'https://news.example.org/story'
-    assert 'campaign plan' in rows[0]['content']
+    assert rows[0]['url'] == 'https://news.google.com/rss/articles/story'
+    assert rows[0]['content'] == 'Prashant Kishore addresses Bihar rally'
+    assert rows[0]['source_provider'] == 'google-news-rss'
 
 
 def test_automation_window_uses_ist(monkeypatch):
@@ -265,5 +264,5 @@ async def test_apify_rejects_unmapped_dataset():
     transport = httpx.MockTransport(lambda req: httpx.Response(200, json=[{'text': 'Jan Suraaj update'}]))
     async with httpx.AsyncClient(transport=transport) as client:
         with pytest.raises(ProviderError):
-            await apify_posts(client, 'news', {'api_key': 'apify-token-value', 'actor_id': 'news-actor'},
+            await apify_posts(client, 'facebook', {'api_key': 'apify-token-value', 'actor_id': 'facebook-actor'},
                               ['Jan Suraaj'], now() - timedelta(hours=1))

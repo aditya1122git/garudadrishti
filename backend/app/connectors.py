@@ -1,15 +1,16 @@
-"""Rate-aware source connectors for YouTube and Apify-backed monitoring."""
+"""Rate-aware connectors for YouTube, Google News RSS and Apify social monitoring."""
 import asyncio
 import ast
 import hashlib
+import html
 import json
 import random
 import re
 import time
-import socket
-import ipaddress
 from datetime import datetime, timezone
-from urllib.parse import quote, urlparse
+from email.utils import parsedate_to_datetime
+from urllib.parse import quote
+from xml.etree import ElementTree
 import httpx
 from .config import config
 
@@ -21,7 +22,7 @@ NEWS_CHANNELS = (
 
 NEWS_SOURCE_ALIASES = {
     'News18': ('news18',),
-    'Zee Bihar': ('zeebihar', 'zeebiharjharkhand'),
+    'Zee Bihar': ('zeebihar', 'zeebiharjharkhand', 'zeenews', 'zeehindustan'),
     'ABP Bihar': ('abpbihar', 'abplive', 'abpnews'),
     'News State': ('newsstate', 'newsstate24'),
     'Sahara Samay': ('saharasamay', 'samaylive'),
@@ -45,6 +46,7 @@ class ProviderError(RuntimeError):
 async def request(client, method, url, **kwargs):
     comments_optional = kwargs.pop('comments_optional', False)
     response_json = kwargs.pop('response_json', True)
+    response_text = kwargs.pop('response_text', False)
     for attempt in range(4):
         try:
             response = await client.request(method, url, **kwargs)
@@ -59,7 +61,7 @@ async def request(client, method, url, **kwargs):
                 await asyncio.sleep(delay)
                 continue
             response.raise_for_status()
-            return response.json() if response_json else {}
+            return response.text if response_text else response.json() if response_json else {}
         except (httpx.TransportError, httpx.HTTPStatusError) as exc:
             if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 500:
                 raise ProviderError(f'Provider rejected request ({exc.response.status_code})') from None
@@ -67,16 +69,6 @@ async def request(client, method, url, **kwargs):
                 raise ProviderError('Provider unavailable') from None
             await asyncio.sleep(2 ** attempt)
     raise ProviderError('Provider unavailable')
-
-
-async def validate_destination(url):
-    parsed = urlparse(url)
-    allowed = {h.strip().lower() for h in config().outbound_allowed_hosts.split(',') if h.strip()}
-    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.port not in [None, 443] or parsed.hostname.lower() not in allowed:
-        raise ProviderError('Endpoint must use HTTPS and an OUTBOUND_ALLOWED_HOSTS hostname')
-    answers = await asyncio.to_thread(socket.getaddrinfo, parsed.hostname, 443)
-    if not answers or any(not ipaddress.ip_address(a[4][0]).is_global for a in answers):
-        raise ProviderError('Endpoint must resolve to public addresses')
 
 
 def matches(text, keywords):
@@ -133,6 +125,56 @@ async def youtube_posts(client, secret, keywords, since):
             rows.append(row)
     secret.pop('watched_videos', None)
     return rows
+
+
+def _rss_text(value):
+    clean = re.sub(r'<[^>]+>', ' ', html.unescape(value or ''))
+    return ' '.join(clean.split())
+
+
+async def google_news_posts(client, keywords, since):
+    """Fetch approved Bihar publishers from Google News public RSS search feeds."""
+    keyword_query = ' OR '.join(f'"{term}"' for term in keywords)
+
+    async def fetch(channel):
+        query = f'({keyword_query}) "{channel}" when:1d'
+        xml = await request(client, 'GET', 'https://news.google.com/rss/search', params={
+            'q': query, 'hl': 'hi', 'gl': 'IN', 'ceid': 'IN:hi',
+        }, headers={'Accept': 'application/rss+xml, application/xml;q=0.9'}, response_text=True)
+        try:
+            root = ElementTree.fromstring(xml)
+        except ElementTree.ParseError:
+            raise ProviderError('Google News returned invalid RSS') from None
+        found = []
+        for item in root.findall('./channel/item'):
+            source = _rss_text(item.findtext('source'))
+            if not _approved_news_source(source):
+                continue
+            title = _rss_text(item.findtext('title'))
+            suffix = f' - {source}'
+            headline = title[:-len(suffix)].strip() if source and title.endswith(suffix) else title
+            if not headline or not matches(headline, keywords):
+                continue
+            try:
+                published = parsedate_to_datetime(item.findtext('pubDate') or '').astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            if published < since:
+                continue
+            url = (item.findtext('link') or '').strip()
+            guid = (item.findtext('guid') or '').strip()
+            external_id = guid or hashlib.sha256(f'{url}\0{headline}\0{published.isoformat()}'.encode()).hexdigest()
+            row = post('news', external_id, source, headline, url, published.isoformat())
+            row.update(source_provider='google-news-rss', content_scope='google-news-rss-v1', title=headline)
+            found.append(row)
+        return found
+
+    results = await asyncio.gather(*(fetch(channel) for channel in NEWS_CHANNELS))
+    unique = {}
+    for rows in results:
+        for row in rows:
+            unique[row['external_id']] = row
+    return list(unique.values())
 
 
 def _first(item, *paths, default=None):
@@ -204,20 +246,10 @@ def _timestamp(value):
 def _actor_input(platform, template, keywords, since, max_items):
     if not template:
         per_query = max(1, min(50, max_items // max(len(keywords), 1)))
-        news_keywords = ' OR '.join(f'"{term}"' for term in keywords)
-        news_sources = ' OR '.join(f'"{channel}"' for channel in NEWS_CHANNELS)
         defaults = {
             'facebook': {'categories': keywords, 'searchType': 'posts', 'resultsLimit': max_items},
             'instagram': {'searchQueries': keywords[:10], 'maxResultsPerQuery': per_query},
             'x': {'searchTerms': keywords, 'maxItems': max_items, 'sort': 'Latest'},
-            # easyapi/google-news-scraper accepts one query and requires at
-            # least 100 requested results. The response is still capped by
-            # `limit=max_items` in our Apify API call.
-            'news': {'query': f'({news_keywords}) ({news_sources})',
-                     'maxItems': max(100, max_items), 'time_period': 'custom',
-                     'time_period_min': since.strftime('%m/%d/%Y'),
-                     'time_period_max': datetime.now(timezone.utc).strftime('%m/%d/%Y'),
-                     'nfpr': 1, 'filter': 1},
         }
         return defaults[platform]
     values = {
@@ -246,9 +278,9 @@ def _apify_item(platform, item, keywords, since):
     title = str(_first(item, 'title', 'headline', 'article.title', default='')).strip()
     text = str(_first(item, 'text', 'full_text', 'tweetText', 'postText', 'message', 'caption',
                       'description', 'snippet', 'article.description', default='')).strip()
-    # News benefits from its headline plus summary. Social Actors usually expose
-    # the post body in `text`/`caption`; do not ingest replies or comments.
-    content = ' — '.join(dict.fromkeys(x for x in (title, text) if x)) if platform == 'news' else (text or title)
+    # Social Actors expose the post body in `text`/`caption`; replies and
+    # comments are intentionally excluded.
+    content = text or title
     if not content or not matches(content, keywords):
         return None
     published = _timestamp(_first(item, 'publishedAt', 'published_at', 'createdAt', 'created_at', 'takenAt',
@@ -262,8 +294,6 @@ def _apify_item(platform, item, keywords, since):
     author = _author_name(_first(item, 'authorName', 'pageName', 'author.name', 'author.userName', 'author.username',
                                 'author', 'ownerUsername', 'username', 'fullName', 'user.name', 'user',
                                 'channelName', 'source', 'publisher', default='Unknown'))
-    if platform == 'news' and not _approved_news_source(author):
-        return None
     engagement = dict(
         likes=_number(item, 'likesCount', 'likeCount', 'likes', 'favoriteCount', 'stats.likes', 'reactions_count', 'public_metrics.like_count'),
         comments=_number(item, 'commentsCount', 'commentCount', 'comments', 'replyCount', 'stats.comments', 'comments_count', 'public_metrics.reply_count'),
@@ -272,8 +302,6 @@ def _apify_item(platform, item, keywords, since):
     )
     row = post(platform, external_id, author, content, url, published.isoformat(), engagement)
     row.update(source_provider='apify', content_scope='apify-public-post-v1')
-    if platform == 'news':
-        row['title'] = title
     return row
 
 

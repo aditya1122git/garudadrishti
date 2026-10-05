@@ -74,14 +74,11 @@ A local `.env` is provided beside `docker-compose.yml`. It is ignored by Git and
 | `ENABLED_PLATFORMS` | Comma-separated sources: `facebook,instagram,x,youtube,news`; set `youtube` for YouTube-only operation |
 | `YOUTUBE_API_KEY` | YouTube Data API v3 key |
 | `YOUTUBE_INITIAL_LOOKBACK_DAYS`, `YOUTUBE_TERMS_PER_QUERY` | First-run backfill window (7 days) and quota-aware keyword grouping (4 terms) |
-| `APIFY_API_TOKEN` | The only required Apify value; shared across Facebook, Instagram, X and News |
-| `APIFY_FACEBOOK_ACTOR_ID`, `APIFY_INSTAGRAM_ACTOR_ID`, `APIFY_X_ACTOR_ID`, `APIFY_NEWS_ACTOR_ID` | Optional advanced overrides; JanNetra supplies default Actor IDs |
+| `APIFY_API_TOKEN` | Shared by the Facebook, Instagram and X connectors; News does not use Apify |
+| `APIFY_FACEBOOK_ACTOR_ID`, `APIFY_INSTAGRAM_ACTOR_ID`, `APIFY_X_ACTOR_ID` | Optional advanced overrides; JanNetra supplies default Actor IDs |
 | `APIFY_*_INPUT_JSON` | Optional Actor-specific input override with `{{keywords_json}}`, `{{query}}`, `{{since_iso}}`, `{{max_items}}` placeholders |
 | `APIFY_MAX_ITEMS`, `APIFY_RUN_TIMEOUT_SECONDS` | Per-run item guard (50) and synchronous-run timeout (240 seconds) |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` | STARTTLS SMTP; SES SMTP credentials work here |
-| `SENDGRID_API_KEY` | Optional SendGrid HTTP delivery; takes precedence over SMTP |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Enable one Telegram message, including the source link, for each newly classified negative post |
-| `OUTBOUND_ALLOWED_HOSTS` | Exact, comma-separated trusted webhook/adapter hostnames, no wildcard; required for custom outbound URLs |
 | `ALLOWED_ORIGINS` | Exact CORS origins for the UI |
 | `REPORTING_TIMEZONE` | `Asia/Kolkata` by default |
 | `SCHEDULER_ENABLED` | Enables server-side automation; no admin session or open browser is required |
@@ -114,7 +111,7 @@ This uses built-in sample text only. It does not write posts, connect to social 
 | YouTube | Official Data API v3 video search + `videos.list` snippet/statistics | API key and quota. Every 15 minutes from 06:00 through 22:00 IST, active terms are split into OR groups; each group gets a general search and a `videoDuration=short` search, with result deduplication. The initial strategy upgrade backfills 7 days. Only the video title is matched, stored, and classified. Descriptions and comments are excluded. Likes and views are read as video metadata. Legacy YouTube records outside the title-only scope remain stored but are excluded from feeds and totals. |
 | Facebook | Configured Apify Actor | Actor backed by owned/managed Graph access or a licensed compliant listening provider; arbitrary public scraping is outside the supported configuration. |
 | Instagram | Configured Apify Actor | Actor backed by owned/managed professional-account access or a licensed compliant listening provider; arbitrary public scraping is outside the supported configuration. |
-| News | `easyapi/google-news-scraper` through Apify | Runs every four hours from 06:00 through 22:00 IST and retains only News18, Zee Bihar, ABP Bihar, News State, Sahara Samay, Bihar Tak, First Bihar, Live Cities, News4Nation and Hindustani Media. Headline plus available summary is classified. |
+| News | Google News RSS search feeds | Credential-free RSS ingestion runs every four hours from 06:00 through 22:00 IST and retains only News18, Zee Bihar, ABP Bihar, News State, Sahara Samay, Bihar Tak, First Bihar, Live Cities, News4Nation and Hindustani Media. The headline is classified and the Google News article link is retained. |
 
 There is no manual upload/CSV/JSON import endpoint or UI; CSV is export only. Missing Actor credentials show **Not connected**, never fabricated zeros. An unavailable source remains identifiable and its last observed figures are marked partial/stale. The operator must choose Actors and data access that comply with platform terms and applicable law. For Facebook and Instagram, JanNetra supports only owned/managed access or a licensed compliant listening source routed through Apify. Zero engagement metrics may represent unavailable fields; “interactions” is likes + comments + shares, not views.
 
@@ -122,7 +119,7 @@ YouTube Search API is relevance-ranked and does not promise an exhaustive list o
 
 ### Apify Actor contract
 
-`APIFY_API_TOKEN` is sufficient for the standard setup. JanNetra currently selects `apify/facebook-search-scraper`, `data-slayer/instagram-keyword-posts-scraper`, `apidojo/tweet-scraper`, and `easyapi/google-news-scraper`, with source-specific keyword inputs and comments disabled. The connector runs Apify's synchronous dataset endpoint with bearer authentication, a response item guard, bounded timeout and retry/backoff. The EasyAPI news Actor requires a minimum request size of 100; JanNetra still limits the returned dataset items to `APIFY_MAX_ITEMS`.
+`APIFY_API_TOKEN` configures `apify/facebook-search-scraper`, `data-slayer/instagram-keyword-posts-scraper`, and `apidojo/tweet-scraper`, with source-specific keyword inputs and comments disabled. News is fetched separately from Google News RSS and requires no API token. Social connectors run Apify's synchronous dataset endpoint with bearer authentication, a response item guard, bounded timeout and retry/backoff.
 
 Actor IDs and JSON templates remain optional advanced overrides because Store Actors and their schemas can change independently of JanNetra. When overriding an Actor, copy its working JSON input from Apify Console and replace values with the supported placeholders.
 
@@ -143,14 +140,12 @@ APScheduler → connected API adapters → deduplicated raw posts
                                       ↓
 MongoDB $match → $group with $dateTrunc(timezone) → daily aggregates
                                       ↓
-Unique daily alert → dashboard / leased email + webhook delivery
+Unique daily alert → dashboard; per-post negative → Telegram
 ```
 
 Daily counts include classified posts from configured platforms only. `negativity_index = negative / classified × 100`; pending classifications are displayed separately and not counted as neutral. A reporting day is midnight-to-midnight in Asia/Kolkata, including the correct UTC boundaries. Aggregation recomputes the most recent 35 days to incorporate late-arriving posts. The dashboard shows 30 days. Weekly/monthly exports mean rolling 7/30 reporting days, including today; they do not mean calendar weeks/months.
 
-Alert creation is idempotent on a unique `date` index, strictly **negative_count > threshold**. Evidence contains the five negative posts with highest likes + replies/comments + shares, and per-platform negative counts. Repeated syncs refresh counts/evidence without reopening resolved alerts. Resolving an alert acknowledges that reporting day; it will not create a second alert for the day. Past days can trigger if late data crosses the threshold. Changing the threshold takes effect on the next sync.
-
-Notifications are configurable in Settings. They use per-channel atomic leases and record successful delivery; failed deliveries retry. Webhooks receive an `Idempotency-Key: jannetra:YYYY-MM-DD` header. The receiver should deduplicate it. Delivery is **at least once**, not exactly once: a crash after a remote send and before marking it delivered can duplicate an email. SMTP uses a stable Message-ID. Generic webhooks are supported; Slack/Telegram-specific payload mapping belongs in the receiver adapter.
+Alert creation is idempotent on a unique `date` index and fires strictly above the internal 500-negative-post daily threshold. Evidence contains the five negative posts with highest likes + replies/comments + shares, and per-platform negative counts. Repeated syncs refresh counts/evidence without reopening resolved alerts. Resolving an alert acknowledges that reporting day; it will not create a second alert for the day. Past days can trigger if late data crosses the threshold.
 
 Per-post Telegram alerts are enabled when both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. Each newly classified negative post is queued once and sent with its platform, author, confidence, excerpt and original link. Successful posts are marked sent; failed deliveries retry on a later sync. Existing historical negatives are not backfilled automatically, preventing a notification flood when Telegram is first enabled.
 
@@ -161,7 +156,8 @@ The scheduler runs inside the API process without a logged-in admin. YouTube ing
 - OAuth2 password form login issues a 60-minute JWT, validates audience/issuer/algorithm and loads the current user's role on every request. Tokens remain in browser memory, not local storage. Reloading signs out.
 - Passwords use bcrypt. Login attempt buckets are stored in MongoDB with TTL; configure trusted proxy/rate limiting at the public edge. The bundled API ignores untrusted forwarded headers.
 - Admins can change configuration, credentials, users, and alert resolution. Viewers can read and export. Create viewer accounts with authenticated `POST /api/users` (OpenAPI at `/docs` when accessing the API directly).
-- Credentials and webhook secrets are encrypted with Fernet. API responses never disclose ciphertext or raw secrets. Audit logs record logins, views, exports and administrative changes; TTL is 90 days.
+- Clicking the navbar account opens the authenticated profile page. Name and email changes are stored in MongoDB; password changes require the current password and are re-hashed with bcrypt.
+- Platform credentials are encrypted with Fernet. API responses never disclose ciphertext or raw secrets. Audit logs record logins, views, exports, profile changes and administrative changes; TTL is 90 days.
 - Custom outbound endpoints require an environment-controlled exact hostname allowlist and public DNS resolution, checked at configuration and delivery. Redirects are disabled. Also enforce network egress rules in production to prevent DNS-rebinding and cloud-metadata access.
 - Beanie models use `schema_version=1`; startup initializes all specified indexes. Native Motor updates implement idempotent upserts and aggregation. Future breaking schemas require a reviewed, versioned data migration before startup; no SQL or Alembic is used.
 - Run **one API worker / one scheduler instance** with this APScheduler setup. For horizontal scaling, move ingestion/classification to dedicated workers with durable queue leases (arq/Celery) and disable the API scheduler. In-process scheduling is not a distributed queue.
@@ -178,7 +174,7 @@ npm ci
 npm run build
 ```
 
-Tests cover IST boundaries, strict threshold semantics, daily alert deduplication, encrypted secrets, batch-length fallback, invalid confidence, Hindi/PK matching, X token failover without quota evasion, authentication, viewer restrictions, filtering/sorting and exports. See `VERIFICATION.md` for checks actually performed in the build environment and checks still requiring real infrastructure/credentials.
+Tests cover IST boundaries, strict threshold semantics, daily alert deduplication, Google News RSS parsing, encrypted secrets, profile/password updates, batch-length fallback, invalid confidence, Hindi/PK matching, X token failover without quota evasion, authentication, viewer restrictions, filtering/sorting and exports. See `VERIFICATION.md` for checks actually performed in the build environment and checks still requiring real infrastructure/credentials.
 
 Official references: [Hugging Face model card](https://huggingface.co/cardiffnlp/twitter-xlm-roberta-base-sentiment), [YouTube API](https://developers.google.com/youtube/v3/docs), [YouTube full video snippets](https://developers.google.com/youtube/v3/docs/videos/list), [Beanie documentation](https://beanie-odm.dev/).
 

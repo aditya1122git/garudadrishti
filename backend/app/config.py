@@ -9,7 +9,6 @@ DEFAULT_APIFY_ACTORS = {
     'facebook': 'apify~facebook-search-scraper',
     'instagram': 'data-slayer~instagram-keyword-posts-scraper',
     'x': 'apidojo~tweet-scraper',
-    'news': 'easyapi~google-news-scraper',
 }
 
 
@@ -46,25 +45,16 @@ class Config(BaseSettings):
     apify_facebook_actor_id: str = ''
     apify_instagram_actor_id: str = ''
     apify_x_actor_id: str = ''
-    apify_news_actor_id: str = ''
     apify_facebook_input_json: str = ''
     apify_instagram_input_json: str = ''
     apify_x_input_json: str = ''
-    apify_news_input_json: str = ''
     apify_max_items: int = 50
     apify_run_timeout_seconds: int = 240
     youtube_api_key: str = ''
     youtube_initial_lookback_days: int = 7
     youtube_terms_per_query: int = 4
-    smtp_host: str = ''
-    smtp_port: int = 587
-    smtp_username: str = ''
-    smtp_password: str = ''
-    smtp_from: str = ''
-    sendgrid_api_key: str = ''
     telegram_bot_token: str = ''
     telegram_chat_id: str = ''
-    outbound_allowed_hosts: str = ''
     allowed_origins: str = 'http://localhost:5173,http://localhost:8080'
     reporting_timezone: str = 'Asia/Kolkata'
     scheduler_enabled: bool = True

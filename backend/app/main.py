@@ -1,15 +1,13 @@
 import asyncio
 import csv
 import io
-import ipaddress
-import socket
 from contextlib import asynccontextmanager
 from datetime import timedelta, date
-from urllib.parse import urlparse
 import bcrypt
 import httpx
 import jwt
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 from beanie import init_beanie
 from motor.motor_asyncio import AsyncIOMotorClient
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -46,12 +44,16 @@ async def lifespan(app):
     if c.bootstrap_email:
         if not await db.users.find_one({'email': c.bootstrap_email}):
             hashed = await asyncio.to_thread(bcrypt.hashpw, c.bootstrap_password.encode(), bcrypt.gensalt())
-            await db.users.insert_one(dict(email=c.bootstrap_email, hashed_password=hashed.decode(), role='admin'))
+            await db.users.insert_one(dict(name='Administrator', email=c.bootstrap_email,
+                                           hashed_password=hashed.decode(), role='admin'))
     elif not await db.users.find_one({}):
         raise RuntimeError('No users exist. Set BOOTSTRAP_EMAIL and BOOTSTRAP_PASSWORD for the first startup only.')
     for term in dict.fromkeys(KEYWORDS + DEFAULT_KEYWORD_VARIANTS):
         await db.tracked_keywords.update_one({'keyword': term}, {'$setOnInsert': {'keyword': term, 'is_active': True}}, upsert=True)
-    await db.settings.update_one({'_id': 'main'}, {'$setOnInsert': {'threshold': 500, 'email': '', 'email_enabled': False, 'webhook_enabled': False}}, upsert=True)
+    await db.settings.update_one({'_id': 'main'}, {
+        '$set': {'threshold': 500},
+        '$unset': {'email': '', 'email_enabled': '', 'webhook_enabled': '', 'webhook_secret': ''},
+    }, upsert=True)
     # Repair historical Facebook rows created when an Actor serialized its
     # author object into a string. This keeps the UI and exports readable.
     async for stored in db.posts.find({'platform': 'facebook', 'author': {'$regex': r'^\s*\{'}}, {'author': 1}):
@@ -61,7 +63,7 @@ async def lifespan(app):
     if c.youtube_api_key and not c.seed_mock_data and 'youtube' in c.enabled_platforms.split(','):
         await db.platform_credentials.update_one({'platform': 'youtube'}, {'$setOnInsert': dict(platform='youtube', mode='official',
             encrypted_api_key=encrypt({'api_key': c.youtube_api_key}), status='pending', last_synced_at=None)}, upsert=True)
-    for p in ['facebook', 'instagram', 'x', 'news']:
+    for p in ['facebook', 'instagram', 'x']:
         actor_id = getattr(c, f'apify_{p}_actor_id')
         if c.apify_api_token and actor_id and not c.seed_mock_data and p in c.enabled_platforms.split(','):
             secret = {'api_key': c.apify_api_token, 'actor_id': actor_id,
@@ -70,6 +72,13 @@ async def lifespan(app):
                 encrypted_api_key=encrypt(secret), status='pending', last_synced_at=None)}, upsert=True)
         elif not c.seed_mock_data:
             await db.platform_credentials.delete_one({'platform': p, 'mode': {'$ne': 'apify'}})
+    if not c.seed_mock_data and 'news' in c.enabled_platforms.split(','):
+        news_credential = await db.platform_credentials.find_one({'platform': 'news'})
+        if not news_credential or news_credential.get('mode') != 'official':
+            await db.platform_credentials.update_one({'platform': 'news'}, {'$set': dict(
+                platform='news', mode='official', encrypted_api_key=encrypt({}), status='pending',
+                last_synced_at=None, error=None,
+            ), '$unset': {'last_attempt_at': ''}}, upsert=True)
     if not c.seed_mock_data and 'youtube' in c.enabled_platforms.split(','):
         # One-time scope upgrade: refresh the last day using complete video snippets.
         await db.platform_credentials.update_one({'platform': 'youtube',
@@ -184,7 +193,8 @@ async def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
     token = jwt.encode({'sub': str(user['_id']), 'exp': now() + timedelta(minutes=60), 'iat': now(), 'aud': 'jannetra', 'iss': 'jannetra'},
                        config().jwt_secret, algorithm='HS256')
     await audit(db(), user, 'login')
-    return {'access_token': token, 'token_type': 'bearer', 'role': user['role'], 'email': user['email']}
+    return {'access_token': token, 'token_type': 'bearer', 'role': user['role'],
+            'name': user.get('name') or 'Administrator', 'email': user['email']}
 
 @app.get('/api/overview')
 async def overview(platform: Platform | None = None, user=Depends(current_user)):
@@ -229,41 +239,18 @@ async def posts(q: str = Query('', max_length=200), platform: Platform | None = 
 
 @app.get('/api/settings')
 async def read_settings(user=Depends(current_user)):
-    prefs = await settings(db())
-    prefs.pop('webhook_secret', None)
-    return serialize({**prefs, 'keywords': await db().tracked_keywords.find({}, {'_id': 0}).to_list(None),
+    return serialize({'keywords': await db().tracked_keywords.find({}, {'_id': 0}).to_list(None),
                       'credentials': await db().platform_credentials.find({'platform': {'$in': PLATFORMS}}, {'encrypted_api_key': 0}).to_list(None),
                       'sources': await statuses(db()), 'model': config().hf_model, 'classifier': classifier_status()})
 
 class Preferences(BaseModel):
-    threshold: int = Field(ge=1, le=10000000)
     keywords: list[str] = Field(min_length=1, max_length=30)
-    email: str = Field(default='', max_length=254)
-    email_enabled: bool = False
-    webhook_enabled: bool = False
-    webhook_url: str = Field(default='', max_length=2048)
 
-async def public_https(url):
-    from .connectors import validate_destination, ProviderError
-    try:
-        await validate_destination(url)
-    except (OSError, ValueError, ProviderError) as exc:
-        raise HTTPException(422, str(exc))
 
 @app.put('/api/settings')
 async def update_settings(value: Preferences, user=Depends(admin)):
     if any(not k.strip() or len(k) > 100 for k in value.keywords):
-        raise HTTPException(422, 'Keywords must contain 1–100 characters')
-    if value.email_enabled and ('@' not in value.email or '\n' in value.email or '\r' in value.email):
-        raise HTTPException(422, 'A valid email destination is required')
-    old = await settings(db())
-    if value.webhook_enabled and not value.webhook_url and not old.get('webhook_secret'):
-        raise HTTPException(422, 'A webhook URL is required')
-    data = value.model_dump(exclude={'keywords', 'webhook_url'})
-    if value.webhook_url:
-        await public_https(value.webhook_url)
-        data['webhook_secret'] = encrypt({'url': value.webhook_url})
-    await db().settings.update_one({'_id': 'main'}, {'$set': data})
+        raise HTTPException(422, 'Keywords must contain 1-100 characters')
     terms = list(dict.fromkeys(k.strip() for k in value.keywords))
     for term in terms:
         await db().tracked_keywords.update_one({'keyword': term}, {'$set': {'is_active': True}}, upsert=True)
@@ -271,8 +258,9 @@ async def update_settings(value: Preferences, user=Depends(admin)):
     await audit(db(), user, 'settings.update')
     return {'saved': True}
 
+
 class CredentialInput(BaseModel):
-    platform: Literal['facebook', 'instagram', 'x', 'youtube', 'news']
+    platform: Literal['facebook', 'instagram', 'x', 'youtube']
     mode: Literal['official', 'apify'] = 'official'
     api_key: str = Field(min_length=10, max_length=10000)
     actor_id: str = Field(default='', max_length=200)
@@ -286,7 +274,7 @@ async def credentials(value: CredentialInput, user=Depends(admin)):
     if value.platform == 'youtube' and value.mode != 'official':
         raise HTTPException(422, 'YouTube uses the official Data API')
     if value.platform != 'youtube' and value.mode != 'apify':
-        raise HTTPException(422, 'Facebook, Instagram, X and News use Apify')
+        raise HTTPException(422, 'Facebook, Instagram and X use Apify')
     if value.mode == 'apify':
         import json, re
         value.actor_id = value.actor_id.strip() or DEFAULT_APIFY_ACTORS[value.platform]
@@ -320,6 +308,41 @@ async def resolve(day: date, user=Depends(admin)):
     await audit(db(), user, 'alert.resolve', {'date': day.isoformat()})
     return {'resolved': True}
 
+
+@app.get('/api/profile')
+async def read_profile(user=Depends(current_user)):
+    return {'name': user.get('name') or 'Administrator', 'email': user['email'], 'role': user['role']}
+
+
+class ProfileInput(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    email: str = Field(min_length=3, max_length=254)
+    current_password: str = Field(min_length=1, max_length=72)
+    new_password: str = Field(default='', max_length=72)
+
+
+@app.put('/api/profile')
+async def update_profile(value: ProfileInput, user=Depends(current_user)):
+    name = ' '.join(value.name.split())
+    email = value.email.strip().lower()
+    if len(name) < 2 or '@' not in email or '\n' in email or '\r' in email:
+        raise HTTPException(422, 'Valid name and email are required')
+    if len(value.current_password.encode()) > 72 or not await asyncio.to_thread(
+            bcrypt.checkpw, value.current_password.encode(), user['hashed_password'].encode()):
+        raise HTTPException(401, 'Current password is incorrect')
+    changes = {'name': name, 'email': email}
+    if value.new_password:
+        if len(value.new_password) < 14 or len(value.new_password.encode()) > 72:
+            raise HTTPException(422, 'New password must contain 14-72 UTF-8 bytes')
+        changes['hashed_password'] = (await asyncio.to_thread(
+            bcrypt.hashpw, value.new_password.encode(), bcrypt.gensalt())).decode()
+    try:
+        await db().users.update_one({'_id': user['_id']}, {'$set': changes})
+    except DuplicateKeyError:
+        raise HTTPException(409, 'Email address is already in use')
+    await audit(db(), user, 'profile.update', {'email': email, 'password_changed': bool(value.new_password)})
+    return {'saved': True, 'name': name, 'email': email, 'role': user['role']}
+
 class NewUser(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=14, max_length=72)
@@ -327,7 +350,6 @@ class NewUser(BaseModel):
 
 @app.post('/api/users', status_code=201)
 async def add_user(value: NewUser, user=Depends(admin)):
-    from pymongo.errors import DuplicateKeyError
     if '@' not in value.email or len(value.password.encode()) > 72:
         raise HTTPException(422, 'Valid email and password at most 72 bytes required')
     hashed = await asyncio.to_thread(bcrypt.hashpw, value.password.encode(), bcrypt.gensalt())

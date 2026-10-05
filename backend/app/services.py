@@ -4,13 +4,11 @@ import random
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from email.message import EmailMessage
-import aiosmtplib
 from cryptography.fernet import Fernet
 from pymongo.errors import DuplicateKeyError
 from .config import config
 from .models import now
-from .connectors import apify_posts, youtube_posts, request, validate_destination
+from .connectors import apify_posts, google_news_posts, youtube_posts, request
 from .sentiment import classifier
 
 POST_SCOPE = {'$or': [{'platform': {'$ne': 'youtube'}}, {'demo': True}, {'content_scope': 'youtube-title-only-v2'}]}
@@ -40,7 +38,7 @@ def decrypt(value):
     return json.loads(Fernet(config().encryption_key.encode()).decrypt(value.encode()))
 
 async def settings(db):
-    return await db.settings.find_one({'_id': 'main'}) or {'threshold': 500, 'email': '', 'webhook_enabled': False, 'email_enabled': False}
+    return await db.settings.find_one({'_id': 'main'}) or {'threshold': 500}
 
 async def audit(db, user, action, meta=None):
     await db.audit_logs.insert_one(dict(user_id=str(user['_id']), action=action, timestamp=now(), meta=meta or {}))
@@ -53,7 +51,8 @@ async def statuses(db):
         if config().seed_mock_data and p in ['x', 'youtube']:
             result.append(dict(platform=p, source='Demo', status='demo', last_synced_at=now()))
         elif c:
-            result.append(dict(platform=p, source='Apify Actor' if c['mode'] == 'apify' else 'Live API',
+            source = 'Google News RSS' if p == 'news' else 'Apify Actor' if c['mode'] == 'apify' else 'Live API'
+            result.append(dict(platform=p, source=source,
                                status=c.get('status', 'pending'), last_synced_at=c.get('last_synced_at'), error=c.get('error')))
         else:
             result.append(dict(platform=p, source='Not connected', status='disconnected', last_synced_at=None))
@@ -107,46 +106,6 @@ async def create_alert(db, day):
                                                content_scope='youtube-title-only-v2')}, upsert=True)
     except DuplicateKeyError:
         pass
-
-async def notify_alerts(db, client):
-    if config().seed_mock_data:
-        return  # Synthetic records must never send external notifications.
-    prefs = await settings(db)
-    async for alert in db.alerts.find({'resolved': False, 'content_scope': 'youtube-title-only-v2'}):
-        payload = dict(date=alert['date'], negative_count=alert['negative_count'], threshold=alert['threshold'],
-                       platform_breakdown=alert['platform_breakdown'], top_negative_posts=alert['top_negative_posts'])
-        body = json.dumps(payload, default=str, ensure_ascii=False)
-        for channel in ['email', 'webhook']:
-            if not prefs.get(channel + '_enabled') or channel in alert.get('notified_channels', []):
-                continue
-            # Single-process scheduler plus an atomic lease protects manual and scheduled retries.
-            claim = await db.alerts.update_one({'_id': alert['_id'], 'notified_channels': {'$ne': channel},
-                '$or': [{f'leases.{channel}': {'$exists': False}}, {f'leases.{channel}': {'$lt': now()}}]},
-                {'$set': {f'leases.{channel}': now() + timedelta(minutes=5)}})
-            if not claim.modified_count:
-                continue
-            try:
-                if channel == 'webhook':
-                    url = decrypt(prefs['webhook_secret'])['url']
-                    await validate_destination(url)
-                    await request(client, 'POST', url, json=json.loads(body), response_json=False,
-                                  headers={'Idempotency-Key': f'jannetra:{alert["date"]}'})
-                elif config().sendgrid_api_key:
-                    response = await client.post('https://api.sendgrid.com/v3/mail/send', headers={'Authorization': f'Bearer {config().sendgrid_api_key}'},
-                        json={'personalizations': [{'to': [{'email': prefs['email']}]}], 'from': {'email': config().smtp_from},
-                              'subject': f'JanNetra alert • {alert["date"]}', 'content': [{'type': 'text/plain', 'value': body}]})
-                    response.raise_for_status()
-                else:
-                    message = EmailMessage(); message['From'] = config().smtp_from; message['To'] = prefs['email']
-                    message['Subject'] = f'JanNetra alert • {alert["date"]}'
-                    message['Message-ID'] = f'<jannetra-{alert["date"]}@{config().smtp_from.split("@")[-1]}>'
-                    message.set_content(body)
-                    await aiosmtplib.send(message, hostname=config().smtp_host, port=config().smtp_port,
-                                          username=config().smtp_username or None, password=config().smtp_password or None, start_tls=True)
-                await db.alerts.update_one({'_id': alert['_id']}, {'$addToSet': {'notified_channels': channel}, '$unset': {f'notification_errors.{channel}': ''}})
-            except Exception:
-                await db.alerts.update_one({'_id': alert['_id']}, {'$set': {f'notification_errors.{channel}': 'Delivery failed; retry scheduled'}})
-
 
 async def notify_negative_posts(db, client):
     """Send one idempotent Telegram message for every newly classified negative post."""
@@ -235,6 +194,8 @@ async def sync(db, client, platforms=None):
                         since -= timedelta(minutes=5)  # deliberate overlap; compound unique index deduplicates
                         if p == 'youtube':
                             rows = await youtube_posts(client, secret, keywords, since)
+                        elif p == 'news':
+                            rows = await google_news_posts(client, keywords, since)
                         else:
                             if c['mode'] != 'apify':
                                 raise RuntimeError('This source must be configured with Apify')
@@ -299,7 +260,6 @@ async def sync(db, client, platforms=None):
         # Include late-arriving posts from previous reporting days.
         async for day in db.daily_aggregates.find({'platform': 'overall', 'content_scope': 'youtube-title-only-v2'}):
             await create_alert(db, day['date'])
-        await notify_alerts(db, client)
 
 async def seed(db):
     if await db.posts.count_documents({'demo': True}):

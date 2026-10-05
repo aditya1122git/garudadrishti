@@ -31,7 +31,6 @@ async def test_local_classifier_only_processes_pending_live_posts(monkeypatch, f
     monkeypatch.setattr(services, 'config', lambda: Settings())
     monkeypatch.setattr(services, 'classifier', Engine)
     monkeypatch.setattr(services, 'rollup', no_op)
-    monkeypatch.setattr(services, 'notify_alerts', no_op)
     monkeypatch.setattr(services, 'notify_negative_posts', no_op)
     await services.sync(db, None)
     pending = await db.posts.find_one({'platform': 'x', 'external_id': 'pending'})

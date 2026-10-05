@@ -99,6 +99,7 @@ class PlatformCredential(Document):
         indexes = [IndexModel([('platform', 1)], unique=True)]
 
 class User(Document):
+    name: str = ''
     email: str
     hashed_password: str
     role: Literal['admin', 'viewer']
