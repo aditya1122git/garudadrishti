@@ -23,7 +23,7 @@ from .config import config, DEFAULT_APIFY_ACTORS
 from .connectors import _author_name
 from .sentiment import classifier_status
 from .models import DOCUMENTS, now, Platform, Label
-from .services import POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, PLATFORMS, today, bounds, settings, encrypt, audit, statuses, seed, sync
+from .services import POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, PLATFORMS, today, bounds, settings, encrypt, audit, statuses, seed, sync, scheduled_sync
 from .reporting import build_sentiment_pdf
 
 
@@ -94,8 +94,21 @@ async def lifespan(app):
         await sync(db, app.state.http)
     scheduler = AsyncIOScheduler(timezone=c.reporting_timezone)
     if c.scheduler_enabled:
-        scheduler.add_job(sync, 'interval', minutes=c.sync_interval_minutes, args=[db, app.state.http], max_instances=1, coalesce=True,
-                          next_run_time=now() + timedelta(seconds=10))
+        start_hour, end_hour = c.automation_start_hour, c.automation_end_hour
+        apify_hours = list(range(start_hour, end_hour + 1, c.apify_sync_interval_hours))
+        combined_hours = ','.join(map(str, apify_hours))
+        youtube_only_hours = [hour for hour in range(start_hour + 1, end_hour)
+                              if hour not in apify_hours]
+        common = dict(max_instances=1, coalesce=True, misfire_grace_time=300)
+        # Collision-free schedule: combined source runs own the 4-hour boundary;
+        # YouTube fills every other 15-minute slot from 06:00 through 22:00.
+        scheduler.add_job(scheduled_sync, 'cron', hour=combined_hours, minute=0,
+                          args=[db, app.state.http, PLATFORMS], id='all-sources-4h', **common)
+        scheduler.add_job(scheduled_sync, 'cron', hour=f'{start_hour}-{end_hour - 1}', minute='15,30,45',
+                          args=[db, app.state.http, ['youtube']], id='youtube-quarter-hour', **common)
+        if youtube_only_hours:
+            scheduler.add_job(scheduled_sync, 'cron', hour=','.join(map(str, youtube_only_hours)), minute=0,
+                              args=[db, app.state.http, ['youtube']], id='youtube-full-hour', **common)
         scheduler.start()
     yield
     if scheduler.running:

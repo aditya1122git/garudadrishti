@@ -13,6 +13,7 @@ import {
   Cell,
 } from "recharts";
 import { Eye, EyeSlash, LayoutDashboard, Radio, Settings, Download, Search, ArrowUpRight, TriangleAlert, ChevronRight, RefreshCw, LogOut, ShieldCheck, CalendarDays, Activity, Check, Close, Bell, Menu , PlatformIcon } from "./icons";
+// @ts-ignore: CSS is handled by the bundler and has no TypeScript declarations.
 import "bootstrap/dist/css/bootstrap.min.css";
 // @ts-ignore: CSS is handled by the bundler and has no TypeScript declarations.
 import "./style.css";
@@ -390,6 +391,18 @@ function Workspace({
               </p>
             </div>
             <div className="heading-actions">
+              <div
+                className={`classification-progress ${!data || data.pending ? "active" : "complete"}`}
+                aria-label={!data ? "Classification status is loading" : data.pending ? `${num(data.pending)} posts remaining for classification` : "Classification is up to date"}
+              >
+                <div className="classification-progress-copy">
+                  <span>Classification</span>
+                  <strong>{!data ? "Loading" : data.pending ? `${num(data.pending)} remaining` : "Up to date"}</strong>
+                </div>
+                <div className="classification-progress-track" aria-hidden="true">
+                  <i />
+                </div>
+              </div>
               <button
                 onClick={refresh}
                 disabled={busy}
@@ -478,25 +491,6 @@ function Workspace({
                           Review alert
                           <ArrowUpRight size={16} />
                         </button>
-                      </div>
-                    )}
-                    {(data.partial ||
-                      data.pending > 0 ||
-                      ["unavailable", "disconnected"].includes(
-                        data.classifier.status,
-                      )) && (
-                      <div className="warning">
-                        {data.partial
-                          ? "Figures are incomplete: some source data or classifications are pending. "
-                          : ""}
-                        {data.pending > 0
-                          ? `${num(data.pending)} posts await classification. `
-                          : ""}
-                        {["unavailable", "disconnected"].includes(
-                          data.classifier.status,
-                        )
-                          ? "Sentiment engine unavailable."
-                          : ""}
                       </div>
                     )}
                     <div className="platform-tabs">

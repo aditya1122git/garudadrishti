@@ -13,6 +13,30 @@ from urllib.parse import quote, urlparse
 import httpx
 from .config import config
 
+NEWS_CHANNELS = (
+    'News18', 'Zee Bihar', 'ABP Bihar', 'News State', 'Sahara Samay',
+    'Bihar Tak', 'First Bihar', 'Live Cities', 'News4Nation',
+    'Hindustani Media',
+)
+
+NEWS_SOURCE_ALIASES = {
+    'News18': ('news18',),
+    'Zee Bihar': ('zeebihar', 'zeebiharjharkhand'),
+    'ABP Bihar': ('abpbihar', 'abplive', 'abpnews'),
+    'News State': ('newsstate', 'newsstate24'),
+    'Sahara Samay': ('saharasamay', 'samaylive'),
+    'Bihar Tak': ('bihartak',),
+    'First Bihar': ('firstbihar',),
+    'Live Cities': ('livecities',),
+    'News4Nation': ('news4nation',),
+    'Hindustani Media': ('hindustanimedia',),
+}
+
+
+def _approved_news_source(value):
+    normalized = re.sub(r'[^a-z0-9]+', '', str(value or '').lower())
+    return any(alias in normalized for aliases in NEWS_SOURCE_ALIASES.values() for alias in aliases)
+
 
 class ProviderError(RuntimeError):
     pass
@@ -180,6 +204,8 @@ def _timestamp(value):
 def _actor_input(platform, template, keywords, since, max_items):
     if not template:
         per_query = max(1, min(50, max_items // max(len(keywords), 1)))
+        news_keywords = ' OR '.join(f'"{term}"' for term in keywords)
+        news_sources = ' OR '.join(f'"{channel}"' for channel in NEWS_CHANNELS)
         defaults = {
             'facebook': {'categories': keywords, 'searchType': 'posts', 'resultsLimit': max_items},
             'instagram': {'searchQueries': keywords[:10], 'maxResultsPerQuery': per_query},
@@ -187,7 +213,7 @@ def _actor_input(platform, template, keywords, since, max_items):
             # easyapi/google-news-scraper accepts one query and requires at
             # least 100 requested results. The response is still capped by
             # `limit=max_items` in our Apify API call.
-            'news': {'query': ' OR '.join(f'"{term}"' for term in keywords),
+            'news': {'query': f'({news_keywords}) ({news_sources})',
                      'maxItems': max(100, max_items), 'time_period': 'custom',
                      'time_period_min': since.strftime('%m/%d/%Y'),
                      'time_period_max': datetime.now(timezone.utc).strftime('%m/%d/%Y'),
@@ -236,6 +262,8 @@ def _apify_item(platform, item, keywords, since):
     author = _author_name(_first(item, 'authorName', 'pageName', 'author.name', 'author.userName', 'author.username',
                                 'author', 'ownerUsername', 'username', 'fullName', 'user.name', 'user',
                                 'channelName', 'source', 'publisher', default='Unknown'))
+    if platform == 'news' and not _approved_news_source(author):
+        return None
     engagement = dict(
         likes=_number(item, 'likesCount', 'likeCount', 'likes', 'favoriteCount', 'stats.likes', 'reactions_count', 'public_metrics.like_count'),
         comments=_number(item, 'commentsCount', 'commentCount', 'comments', 'replyCount', 'stats.comments', 'comments_count', 'public_metrics.reply_count'),

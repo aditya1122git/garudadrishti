@@ -68,7 +68,10 @@ class Config(BaseSettings):
     allowed_origins: str = 'http://localhost:5173,http://localhost:8080'
     reporting_timezone: str = 'Asia/Kolkata'
     scheduler_enabled: bool = True
-    sync_interval_minutes: int = 15
+    automation_start_hour: int = 6
+    automation_end_hour: int = 22
+    youtube_sync_interval_minutes: int = 15
+    apify_sync_interval_hours: int = 4
 
     @model_validator(mode='after')
     def secure_defaults(self):
@@ -106,6 +109,11 @@ class Config(BaseSettings):
             raise ValueError('Invalid ENABLED_PLATFORMS')
         if not 1 <= self.apify_max_items <= 1000 or not 30 <= self.apify_run_timeout_seconds <= 300:
             raise ValueError('Invalid Apify run limits')
+        if (not 0 <= self.automation_start_hour < self.automation_end_hour <= 23
+                or self.youtube_sync_interval_minutes != 15
+                or self.apify_sync_interval_hours != 4
+                or (self.automation_end_hour - self.automation_start_hour) % self.apify_sync_interval_hours):
+            raise ValueError('Automation window must support 15-minute YouTube and 4-hour Apify schedules')
         # A single token is enough for the standard setup. Explicit environment
         # values remain available when an operator wants to swap an Actor.
         for platform, actor_id in DEFAULT_APIFY_ACTORS.items():

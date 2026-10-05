@@ -10,9 +10,9 @@ from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
 from app.config import Config
 from app.models import now
-from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts
+from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window
 from app.sentiment import Classifier
-from app.connectors import matches, apify_posts, _actor_input, ProviderError, request
+from app.connectors import NEWS_CHANNELS, matches, apify_posts, _actor_input, ProviderError, request
 
 
 def test_timezone_boundary():
@@ -48,7 +48,8 @@ def test_token_only_apify_inputs_are_platform_specific():
     assert _actor_input('instagram', '', keywords, since, 20)['searchQueries'] == keywords
     assert _actor_input('x', '', keywords, since, 20)['searchTerms'] == keywords
     news = _actor_input('news', '', keywords, since, 20)
-    assert news['query'] == '"Jan Suraaj" OR "Prashant Kishore"'
+    assert all(term in news['query'] for term in keywords)
+    assert all(channel in news['query'] for channel in NEWS_CHANNELS)
     assert news['maxItems'] == 100 and news['time_period'] == 'custom'
 
 
@@ -60,7 +61,7 @@ async def test_webhook_accepts_empty_success_response():
 
 @pytest.mark.asyncio
 async def test_negative_post_telegram_alert_is_idempotent(monkeypatch):
-    db = AsyncMongoMockClient().test
+    db = AsyncMongoMockClient(tz_aware=True).test
     await db.posts.insert_one({
         'platform': 'facebook', 'external_id': 'negative-1', 'author': 'News Desk',
         'content': 'Jan Suraaj Party plan faces criticism',
@@ -72,7 +73,11 @@ async def test_negative_post_telegram_alert_is_idempotent(monkeypatch):
         seed_mock_data = False
         telegram_bot_token = '123456:test_bot_token_value_long_enough'
         telegram_chat_id = '-1001234567890'
+        reporting_timezone = 'Asia/Kolkata'
+        automation_start_hour = 6
+        automation_end_hour = 22
     monkeypatch.setattr('app.services.config', lambda: Settings())
+    monkeypatch.setattr('app.services.within_automation_window', lambda value=None: True)
     requests = []
     def handler(req):
         requests.append(req)
@@ -86,6 +91,32 @@ async def test_negative_post_telegram_alert_is_idempotent(monkeypatch):
     payload = json.loads(requests[0].content)
     assert payload['chat_id'] == '-1001234567890'
     assert 'https://example.org/post/negative-1' in payload['text']
+
+
+@pytest.mark.asyncio
+async def test_old_negative_post_is_skipped_without_telegram_delivery(monkeypatch):
+    db = AsyncMongoMockClient(tz_aware=True).test
+    await db.posts.insert_one({
+        'platform': 'youtube', 'external_id': 'old-negative', 'author': 'Channel',
+        'content': 'Old negative title', 'url': 'https://youtu.be/old-negative',
+        'published_at': now() - timedelta(days=1), 'demo': False,
+        'sentiment': {'label': 'negative', 'confidence': .9},
+        'telegram_notification': {'status': 'pending'},
+    })
+    class Settings:
+        seed_mock_data = False
+        telegram_bot_token = '123456:test_bot_token_value_long_enough'
+        telegram_chat_id = '-1001234567890'
+        reporting_timezone = 'Asia/Kolkata'
+    monkeypatch.setattr('app.services.config', lambda: Settings())
+    monkeypatch.setattr('app.services.within_automation_window', lambda value=None: True)
+    requests = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: requests.append(req) or httpx.Response(200, json={'ok': True}))) as client:
+        await notify_negative_posts(db, client)
+    stored = await db.posts.find_one({'external_id': 'old-negative'})
+    assert stored['telegram_notification']['status'] == 'skipped'
+    assert requests == []
 
 
 def test_hf_label_mapping_and_low_confidence():
@@ -202,7 +233,7 @@ async def test_easyapi_news_input_and_output_mapping():
         return httpx.Response(200, json=[{
             'title': 'Prashant Kishore addresses Bihar rally',
             'snippet': 'Jan Suraaj leaders shared the campaign plan.',
-            'link': 'https://news.example.org/story', 'source': 'News Desk',
+            'link': 'https://news.example.org/story', 'source': 'News18 Bihar Jharkhand',
             'date_utc': now().isoformat(),
         }])
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -210,10 +241,23 @@ async def test_easyapi_news_input_and_output_mapping():
             'api_key': 'token', 'actor_id': 'easyapi~google-news-scraper', 'max_items': 50,
         }, ['Jan Suraaj', 'Prashant Kishore'], now() - timedelta(days=1))
     assert captured[0]['maxItems'] == 100
-    assert captured[0]['query'] == '"Jan Suraaj" OR "Prashant Kishore"'
-    assert rows[0]['author'] == 'News Desk'
+    assert all(channel in captured[0]['query'] for channel in NEWS_CHANNELS)
+    assert rows[0]['author'] == 'News18 Bihar Jharkhand'
     assert rows[0]['url'] == 'https://news.example.org/story'
     assert 'campaign plan' in rows[0]['content']
+
+
+def test_automation_window_uses_ist(monkeypatch):
+    from datetime import datetime, timezone
+    class Settings:
+        reporting_timezone = 'Asia/Kolkata'
+        automation_start_hour = 6
+        automation_end_hour = 22
+    monkeypatch.setattr('app.services.config', lambda: Settings())
+    assert not within_automation_window(datetime(2026, 10, 4, 0, 29, tzinfo=timezone.utc))  # 05:59 IST
+    assert within_automation_window(datetime(2026, 10, 4, 0, 30, tzinfo=timezone.utc))
+    assert within_automation_window(datetime(2026, 10, 4, 16, 30, tzinfo=timezone.utc))
+    assert not within_automation_window(datetime(2026, 10, 4, 17, 30, tzinfo=timezone.utc))
 
 
 @pytest.mark.asyncio

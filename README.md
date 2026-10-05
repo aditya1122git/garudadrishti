@@ -84,7 +84,9 @@ A local `.env` is provided beside `docker-compose.yml`. It is ignored by Git and
 | `OUTBOUND_ALLOWED_HOSTS` | Exact, comma-separated trusted webhook/adapter hostnames, no wildcard; required for custom outbound URLs |
 | `ALLOWED_ORIGINS` | Exact CORS origins for the UI |
 | `REPORTING_TIMEZONE` | `Asia/Kolkata` by default |
-| `SCHEDULER_ENABLED`, `SYNC_INTERVAL_MINUTES` | Scheduler switch and 15-minute default interval |
+| `SCHEDULER_ENABLED` | Enables server-side automation; no admin session or open browser is required |
+| `AUTOMATION_START_HOUR`, `AUTOMATION_END_HOUR` | Automatic ingestion, classification and Telegram delivery window in `REPORTING_TIMEZONE` (06:00-22:00 by default) |
+| `YOUTUBE_SYNC_INTERVAL_MINUTES`, `APIFY_SYNC_INTERVAL_HOURS` | Fixed YouTube 15-minute and Apify 4-hour schedules |
 
 ### Hugging Face multilingual classifier
 
@@ -109,10 +111,10 @@ This uses built-in sample text only. It does not write posts, connect to social 
 | Platform | Implemented connector | Required access / coverage |
 |---|---|---|
 | X | Configured Apify Actor, normalized output, overlap deduplication and retry/backoff | Apify token, Actor access and the Actor's input schema. |
-| YouTube | Official Data API v3 video search + `videos.list` snippet/statistics | API key and quota. Every 2 hours, active terms are split into OR groups; each group gets a general search and a `videoDuration=short` search, with result deduplication. The initial strategy upgrade backfills 7 days. Only the video title is matched, stored, and classified. Descriptions and comments are excluded. Likes and views are read as video metadata. Legacy YouTube records outside the title-only scope remain stored but are excluded from feeds and totals. |
+| YouTube | Official Data API v3 video search + `videos.list` snippet/statistics | API key and quota. Every 15 minutes from 06:00 through 22:00 IST, active terms are split into OR groups; each group gets a general search and a `videoDuration=short` search, with result deduplication. The initial strategy upgrade backfills 7 days. Only the video title is matched, stored, and classified. Descriptions and comments are excluded. Likes and views are read as video metadata. Legacy YouTube records outside the title-only scope remain stored but are excluded from feeds and totals. |
 | Facebook | Configured Apify Actor | Actor backed by owned/managed Graph access or a licensed compliant listening provider; arbitrary public scraping is outside the supported configuration. |
 | Instagram | Configured Apify Actor | Actor backed by owned/managed professional-account access or a licensed compliant listening provider; arbitrary public scraping is outside the supported configuration. |
-| News | Configured Apify Actor | Public/licensed news access. Headline plus available summary is classified. |
+| News | `easyapi/google-news-scraper` through Apify | Runs every four hours from 06:00 through 22:00 IST and retains only News18, Zee Bihar, ABP Bihar, News State, Sahara Samay, Bihar Tak, First Bihar, Live Cities, News4Nation and Hindustani Media. Headline plus available summary is classified. |
 
 There is no manual upload/CSV/JSON import endpoint or UI; CSV is export only. Missing Actor credentials show **Not connected**, never fabricated zeros. An unavailable source remains identifiable and its last observed figures are marked partial/stale. The operator must choose Actors and data access that comply with platform terms and applicable law. For Facebook and Instagram, JanNetra supports only owned/managed access or a licensed compliant listening source routed through Apify. Zero engagement metrics may represent unavailable fields; “interactions” is likes + comments + shares, not views.
 
@@ -151,6 +153,8 @@ Alert creation is idempotent on a unique `date` index, strictly **negative_count
 Notifications are configurable in Settings. They use per-channel atomic leases and record successful delivery; failed deliveries retry. Webhooks receive an `Idempotency-Key: jannetra:YYYY-MM-DD` header. The receiver should deduplicate it. Delivery is **at least once**, not exactly once: a crash after a remote send and before marking it delivered can duplicate an email. SMTP uses a stable Message-ID. Generic webhooks are supported; Slack/Telegram-specific payload mapping belongs in the receiver adapter.
 
 Per-post Telegram alerts are enabled when both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. Each newly classified negative post is queued once and sent with its platform, author, confidence, excerpt and original link. Successful posts are marked sent; failed deliveries retry on a later sync. Existing historical negatives are not backfilled automatically, preventing a notification flood when Telegram is first enabled.
+
+The scheduler runs inside the API process without a logged-in admin. YouTube ingestion runs every 15 minutes; Facebook, Instagram, X and News run together every four hours at 06:00, 10:00, 14:00, 18:00 and 22:00 IST. Classification follows each ingestion run, and each newly classified negative post is handed to Telegram after its batch. Telegram delivery is restricted to posts whose publication date is today in Asia/Kolkata and to the 06:00-22:00 operating window; older queued posts are marked skipped.
 
 ## Security and deployment
 

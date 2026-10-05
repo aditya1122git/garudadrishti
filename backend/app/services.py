@@ -27,6 +27,12 @@ def bounds(day):
     start = datetime.fromisoformat(day).replace(tzinfo=ZoneInfo(config().reporting_timezone))
     return start.astimezone(timezone.utc), (start + timedelta(days=1)).astimezone(timezone.utc)
 
+
+def within_automation_window(value=None):
+    """Return true during the configured inclusive operating hours."""
+    local = (value or now()).astimezone(ZoneInfo(config().reporting_timezone))
+    return config().automation_start_hour <= local.hour <= config().automation_end_hour
+
 def encrypt(value):
     return Fernet(config().encryption_key.encode()).encrypt(json.dumps(value).encode()).decode()
 
@@ -145,9 +151,17 @@ async def notify_alerts(db, client):
 async def notify_negative_posts(db, client):
     """Send one idempotent Telegram message for every newly classified negative post."""
     c = config()
-    if c.seed_mock_data or not c.telegram_bot_token or not c.telegram_chat_id:
+    if (c.seed_mock_data or not c.telegram_bot_token or not c.telegram_chat_id
+            or not within_automation_window()):
         return
+    start, end = bounds(today())
+    await db.posts.update_many({
+        'telegram_notification.status': {'$in': ['pending', 'failed']},
+        '$or': [{'published_at': {'$lt': start}}, {'published_at': {'$gte': end}}],
+    }, {'$set': {'telegram_notification.status': 'skipped',
+                 'telegram_notification.error': 'Only posts published today are alerted'}})
     query = {'sentiment.label': 'negative', 'demo': False,
+             'published_at': {'$gte': start, '$lt': end},
              'telegram_notification.status': {'$in': ['pending', 'failed']}}
     async for post_row in db.posts.find(query).sort('published_at', 1).limit(100):
         claim = await db.posts.update_one({
@@ -192,18 +206,24 @@ async def notify_negative_posts(db, client):
 
 _sync_lock = asyncio.Lock()
 
-async def sync(db, client):
+async def scheduled_sync(db, client, platforms):
+    """Run without any logged-in user, but only inside the operating window."""
+    if not within_automation_window():
+        return
+    await sync(db, client, platforms=platforms)
+
+
+async def sync(db, client, platforms=None):
     if _sync_lock.locked():
         return
     async with _sync_lock:
         if not config().seed_mock_data:
+            enabled = getattr(config(), 'enabled_platforms', ','.join(PLATFORMS)).split(',')
+            selected = [p for p in (platforms or enabled) if p in enabled]
             keywords = [k['keyword'] async for k in db.tracked_keywords.find({'is_active': True})]
             if keywords:
-                async for c in db.platform_credentials.find({'platform': {'$in': getattr(config(), 'enabled_platforms', ','.join(PLATFORMS)).split(',')}}):
+                async for c in db.platform_credentials.find({'platform': {'$in': selected}}):
                     p = c['platform']
-                    # Search quota budget: YouTube once every 2 hours, other providers per scheduler interval.
-                    if p == 'youtube' and c.get('last_attempt_at') and now() - c['last_attempt_at'] < timedelta(hours=2):
-                        continue
                     started = now()
                     await db.platform_credentials.update_one({'_id': c['_id']}, {'$set': {'last_attempt_at': started}})
                     try:
@@ -236,7 +256,7 @@ async def sync(db, client):
                             'error': str(exc) if isinstance(exc, RuntimeError) else 'Connection failed; check configuration'}})
             engine = classifier()
             try:
-                posts = await db.posts.find({**POST_SCOPE, 'platform': {'$in': getattr(config(), 'enabled_platforms', ','.join(PLATFORMS)).split(',')}, 'sentiment': None, 'demo': False}).limit(200).to_list(200)
+                posts = await db.posts.find({**POST_SCOPE, 'platform': {'$in': enabled}, 'sentiment': None, 'demo': False}).limit(200).to_list(200)
                 size = config().hf_batch_size
                 for offset in range(0, len(posts), size):
                     batch = posts[offset:offset + size]
@@ -247,8 +267,11 @@ async def sync(db, client):
                                 'classification_status': 'awaiting_groq', 'hf_candidate': r.model_dump(),
                                 'classification_error': 'Groq unavailable; low-confidence result excluded from totals'}})
                             continue
+                        start, end = bounds(today())
+                        published_today = start <= p['published_at'] < end
                         notification = ({'status': 'pending', 'created_at': now()}
-                                        if r.sentiment == 'negative' and not p.get('telegram_notification') else None)
+                                        if r.sentiment == 'negative' and published_today
+                                        and not p.get('telegram_notification') else None)
                         update_fields = {'sentiment': dict(
                             label=r.sentiment, confidence=r.confidence, reason=r.reason,
                             model_used=r.model_used or engine.provenance, hf_confidence=r.hf_confidence,
@@ -266,6 +289,8 @@ async def sync(db, client):
                             unset_fields['telegram_notification'] = ''
                         await db.posts.update_one({'_id': p['_id'], 'sentiment': None}, {'$set': update_fields,
                             '$unset': unset_fields})
+                    # Deliver newly classified negatives immediately after each batch.
+                    await notify_negative_posts(db, client)
             except Exception:
                 # Classifier exposes failure state; pending posts are retried next sync.
                 pass

@@ -366,12 +366,58 @@ main {
 }
 .heading-actions {
   display: flex;
+  align-items: center;
   gap: 9px;
   flex-shrink: 0;
 }
 .heading-actions button {
   font-size: 12px;
   padding: 10px 12px;
+}
+.classification-progress {
+  width: 174px;
+  padding: 6px 10px;
+  border: 1px solid #d7dee7;
+  border-radius: 6px;
+  background: #fff;
+}
+.classification-progress-copy {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+.classification-progress-copy strong {
+  color: var(--ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.classification-progress-track {
+  height: 4px;
+  margin-top: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e5eaf0;
+}
+.classification-progress-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #1877f2;
+}
+.classification-progress.complete .classification-progress-track i {
+  width: 100%;
+  background: #2f927c;
+}
+.classification-progress.active .classification-progress-track i {
+  width: 42%;
+  animation: classification-progress 1.25s ease-in-out infinite;
+}
+@keyframes classification-progress {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(260%); }
 }
 .alert-banner {
   border: 1px solid #eac6c3;
@@ -1530,6 +1576,10 @@ dialog::backdrop {
     font-size: 13px;
   }
   .heading-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .classification-progress {
     width: 100%;
   }
   .heading-actions button {
