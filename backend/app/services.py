@@ -252,8 +252,13 @@ async def sync(db, client):
                         update_fields = {'sentiment': dict(
                             label=r.sentiment, confidence=r.confidence, reason=r.reason,
                             model_used=r.model_used or engine.provenance, hf_confidence=r.hf_confidence,
+                            sarcasm_detected=r.sarcasm_detected,
+                            sarcasm_confidence=r.sarcasm_confidence,
+                            sarcasm_model_confidence=r.sarcasm_model_confidence,
+                            sarcasm_model_used=r.sarcasm_model_used,
+                            language=r.language, targets=r.targets,
                             review_required=r.review_required, classified_at=now()), 'classification_status': 'classified',
-                            'sentiment_schema_version': 3}
+                            'sentiment_schema_version': 4}
                         if notification:
                             update_fields['telegram_notification'] = notification
                         unset_fields = {'classification_error': '', 'hf_candidate': ''}

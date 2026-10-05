@@ -53,6 +53,11 @@ type Post = {
     confidence: number;
     reason: string;
     model_used: string;
+    sarcasm_detected?: boolean;
+    sarcasm_confidence?: number;
+    sarcasm_model_confidence?: number;
+    language?: "hi" | "en" | "hinglish";
+    targets?: string[];
     review_required?: boolean;
   } | null;
   classification_status?: string;
@@ -82,6 +87,8 @@ type Overview = {
     threshold?: number;
     fallback_model?: string;
     fallback_configured?: boolean;
+    sarcasm_model?: string;
+    sarcasm_threshold?: number;
   };
   alerts: Alert[];
 };
@@ -1144,6 +1151,9 @@ function Feed({
                     </span>
                     <small title={p.sentiment.reason}>
                       {Math.round(p.sentiment.confidence * 100)}% confidence
+                      {p.sentiment.sarcasm_detected
+                        ? ` · Sarcasm ${Math.round((p.sentiment.sarcasm_confidence || 0) * 100)}%`
+                        : ""}
                       {p.sentiment.review_required ? " · Review" : ""}
                     </small>
                   </>
@@ -1508,10 +1518,11 @@ function SettingsPanel({
         )}
       </section>
       <section className="panel settings-section connections">
-        <div className="panel-title"><h2>Sentiment classifier</h2><span>Hugging Face + Groq fallback</span></div>
+        <div className="panel-title"><h2>Sentiment classifier</h2><span>Sentiment + sarcasm + Groq fallback</span></div>
         <strong>{prefs.model}</strong>
         <p>Status: {prefs.classifier?.status || "pending"}</p>
-        <p>YouTube uses video titles only. Hugging Face scores below {Math.round((prefs.classifier?.threshold ?? 0.75) * 100)}% are sent to Groq for target-aware political sentiment. Confidence is not a guarantee of accuracy.</p>
+        <p>Sarcasm detector: {prefs.classifier?.sarcasm_model || "ashish5193/sarcasm_model"}</p>
+        <p>YouTube uses video titles only. Local sentiment, language, entity and sarcasm signals produce target-wise sentiment. Only combined confidence below {Math.round((prefs.classifier?.threshold ?? 0.60) * 100)}% is sent to Groq. Confidence is not a guarantee of accuracy.</p>
         <p>Groq fallback: {prefs.classifier?.fallback_configured ? `configured (${prefs.classifier?.fallback_model || "server model"})` : "key missing - low-confidence items remain pending"}. Models and threshold are configured through the server environment.</p>
         {prefs.classifier?.error && <p className="error">{prefs.classifier.error}</p>}
       </section>

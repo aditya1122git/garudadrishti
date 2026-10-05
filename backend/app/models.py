@@ -21,6 +21,12 @@ class Sentiment(BaseModel):
     confidence: float = Field(ge=0, le=1)
     reason: str = Field(max_length=300)
     hf_confidence: float | None = None
+    sarcasm_detected: bool = False
+    sarcasm_confidence: float | None = Field(default=None, ge=0, le=1)
+    sarcasm_model_confidence: float | None = Field(default=None, ge=0, le=1)
+    sarcasm_model_used: str | None = None
+    language: Literal['hi', 'en', 'hinglish'] = 'en'
+    targets: list[str] = Field(default_factory=list)
     review_required: bool = False
     model_used: str
     classified_at: datetime = Field(default_factory=now)

@@ -32,9 +32,14 @@ class Config(BaseSettings):
     hf_max_length: int = 256
     hf_cpu_threads: int = 2
     hf_local_files_only: bool = False
+    sarcasm_model: str = 'ashish5193/sarcasm_model'
+    sarcasm_revision: str = '6e8df8df0e3ff4adf248a15f06057cd6b7b173b2'
+    sarcasm_tokenizer_model: str = 'cardiffnlp/twitter-roberta-base-sentiment-latest'
+    sarcasm_tokenizer_revision: str = '3216a57f2a0d9c45a2e6c20157c20c49fb4bf9c7'
+    sarcasm_confidence_threshold: float = 0.65
     groq_api_key: str = ''
     groq_model: str = 'qwen/qwen3.8-27b'
-    hf_confidence_threshold: float = 0.75
+    hf_confidence_threshold: float = 0.60
     groq_concurrency: int = 2
     enabled_platforms: str = 'facebook,instagram,x,youtube,news'
     apify_api_token: str = ''
@@ -91,7 +96,9 @@ class Config(BaseSettings):
             raise ValueError('HF_BATCH_SIZE must be 1..32 and HF_MAX_LENGTH must be 16..512')
         if not 1 <= self.hf_cpu_threads <= 32:
             raise ValueError('HF_CPU_THREADS must be 1..32')
-        if not 0 <= self.hf_confidence_threshold <= 1 or not 1 <= self.groq_concurrency <= 8:
+        if (not 0 <= self.hf_confidence_threshold <= 1
+                or not 0 <= self.sarcasm_confidence_threshold <= 1
+                or not 1 <= self.groq_concurrency <= 8):
             raise ValueError('Invalid classifier threshold/concurrency')
         if not 1 <= self.youtube_initial_lookback_days <= 30 or not 1 <= self.youtube_terms_per_query <= 5:
             raise ValueError('Invalid YouTube search coverage settings')
@@ -107,8 +114,12 @@ class Config(BaseSettings):
                 setattr(self, field, actor_id)
         if self.hf_device not in ('cpu', 'cuda', 'mps'):
             raise ValueError('HF_DEVICE must be cpu, cuda, or mps')
-        if not self.hf_model.strip() or not self.hf_revision.strip():
-            raise ValueError('HF_MODEL and HF_REVISION are required')
+        if not all(value.strip() for value in (
+            self.hf_model, self.hf_revision, self.sarcasm_model,
+            self.sarcasm_revision, self.sarcasm_tokenizer_model,
+            self.sarcasm_tokenizer_revision,
+        )):
+            raise ValueError('Sentiment and sarcasm model names/revisions are required')
         return self
 
 

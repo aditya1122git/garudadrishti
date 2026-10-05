@@ -5,8 +5,9 @@ Checked 2026-10-01 on the local CPU runtime. These are functional checks and sma
 ## Working behavior
 
 - YouTube official search plus videos.list: video title only. No description, comments, or commentThreads content is classified or stored in the active scope.
-- Hugging Face confidence below 0.75 goes to Groq. High-confidence titles also go to Groq when target-attribution risk is detected, including target-only campaign hashtags, opponent references and attributed criticism. The exact 0.75 boundary is covered by an automated test.
-- Groq missing/failing: verification-required items retain sentiment=null, show Awaiting Groq, and are excluded from classified counts. Safe high-confidence HF results still save.
+- Cardiff multilingual sentiment and `ashish5193/sarcasm_model` run locally. Language, target entities, opponent context and Hindi/Hinglish sarcasm cues are combined into target-wise sentiment.
+- Only combined confidence below 0.60 goes to Groq. The exact 0.60 boundary is covered by an automated test.
+- Groq missing/failing: sub-60% items retain sentiment=null, show Awaiting Groq, and are excluded from classified counts. Local results at or above 60% save immediately.
 - Final results retain the model used, HF confidence and review flag. Low-confidence Groq output is flagged for review.
 - Groq JSON validates count and IDs in order, retries malformed batches individually, retries transient transport/rate errors with backoff and limits concurrency.
 
@@ -16,7 +17,7 @@ Model: `cardiffnlp/twitter-xlm-roberta-base-sentiment@f2f1202b1bdeb07342385c3f80
 
 Basic English/Hindi/Hinglish cases: 8/9 matched authored expectations. Warm inference for 9 short texts: 0.386 seconds (host-specific).
 
-Political cases: 11/12 HF labels matched authored expectations. Of 6 results accepted at >=75%, 5 matched. Six remaining cases require Groq. This is too small and selected to estimate production accuracy.
+The table below records the earlier Cardiff-only 75% gate benchmark for comparison; it is not a benchmark of the new combined pipeline. Political cases: 11/12 HF labels matched authored expectations. Of 6 results accepted at >=75%, 5 matched. Six remaining cases required Groq. This is too small and selected to estimate production accuracy.
 
 | Input | Expected target sentiment | HF prediction | Confidence | Route |
 |---|---|---|---:|---|
@@ -33,7 +34,7 @@ Political cases: 11/12 HF labels matched authored expectations. Of 6 results acc
 | वाह प्रशांत किशोर! फिर एक और खोखला वादा। जनता को बेवकूफ समझ रखा है? | negative | negative | 80.0% | HF accepted |
 | Jan Suraj Party announces candidate list for the upcoming election. | neutral | neutral | 65.1% | Groq pending |
 
-**Corrected target-attribution case:** HF can assign high negative confidence when Prashant Kishore criticizes government policies or when a Jan Suraaj campaign title sarcastically attacks an opponent. Schema v3 routes these attribution-risk titles to the target-aware verifier regardless of HF confidence. The live screenshot case `BJP à¤•à¥‹ à¤µà¥‹à¤Ÿ à¤•à¥€à¤œà¤¿à¤ à¤›à¤¤ à¤¸à¥‡ à¤ªà¤¾à¤¨à¥€ à¤†à¤à¤—à¤¾ #prashantkishor #jansuraj` returned positive at 0.95 confidence because the negative language targets BJP, while the campaign context supports Jan Suraaj. Broad political accuracy is still not established.
+**Corrected target-attribution case:** Schema v4 runs language detection, entity detection, Cardiff sentiment and local sarcasm analysis before the Groq gate. For `BJP à¤•à¥‹ à¤µà¥‹à¤Ÿ à¤•à¥€à¤œà¤¿à¤ à¤›à¤¤ à¤¸à¥‡ à¤ªà¤¾à¤¨à¥€ à¤†à¤à¤—à¤¾ #prashantkishor #jansuraj`, Cardiff returned neutral at 0.354 and the sarcasm model itself returned only 0.002, consistent with its documented generalization limitation. The combined political-sarcasm cue and target context returned positive at 0.95 locally, with no Groq call. Broad political accuracy is still not established.
 
 HF truncates inputs to configured HF_MAX_LENGTH tokens (256 by default) and flags truncation in the reason. Groq fallback receives only the title. Hinglish, sarcasm, clickbait and ambiguous short titles need representative human review.
 

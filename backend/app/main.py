@@ -83,10 +83,10 @@ async def lifespan(app):
         await db.posts.update_many({'platform': 'youtube', 'content_scope': 'youtube-title-only-v2'},
                                    {'$unset': {'description': ''}})
     if not c.seed_mock_data:
-        # Schema v3 adds target-attribution verification for opponent criticism.
+        # Schema v4 combines local sentiment, sarcasm, language and entity signals.
         # Reclassify active records from every enabled source exactly once.
         await db.posts.update_many({**POST_SCOPE, 'demo': False, 'sentiment': {'$ne': None},
-                                    'sentiment_schema_version': {'$ne': 3}},
+                                    'sentiment_schema_version': {'$ne': 4}},
                                    {'$set': {'sentiment': None, 'classification_status': 'pending'},
                                     '$unset': {'classification_error': '', 'hf_candidate': ''}})
     if c.seed_mock_data:
