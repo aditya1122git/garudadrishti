@@ -174,6 +174,11 @@ async def notify_negative_posts(db, client):
 
 _sync_lock = asyncio.Lock()
 
+
+def sync_running():
+    """Report whether an ingestion/classification cycle currently owns the lock."""
+    return _sync_lock.locked()
+
 async def scheduled_sync(db, client, platforms):
     """Run without any logged-in user, but only inside the operating window."""
     prefs = await settings(db)

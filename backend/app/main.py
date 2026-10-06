@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import io
+import logging
 from contextlib import asynccontextmanager
 from datetime import timedelta, date
 import bcrypt
@@ -22,8 +23,20 @@ from .config import (config, APIFY_SYNC_INTERVAL_HOURS, DEFAULT_AUTOMATION_START
 from .connectors import _author_name
 from .sentiment import classifier_status
 from .models import DOCUMENTS, now, Platform, Label
-from .services import POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, PLATFORMS, today, bounds, settings, encrypt, audit, statuses, seed, sync, scheduled_sync
+from .services import POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, PLATFORMS, today, bounds, settings, encrypt, audit, statuses, seed, sync, scheduled_sync, sync_running
 from .reporting import build_sentiment_pdf
+
+logger = logging.getLogger(__name__)
+
+
+async def background_manual_sync(database, client):
+    """Keep the HTTP request fast while the existing sync lock prevents overlap."""
+    try:
+        await sync(database, client)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception('Manual background sync failed')
 
 
 def configure_automation_jobs(scheduler, database, client, start_hour: int, end_hour: int):
@@ -96,6 +109,7 @@ async def lifespan(app):
     await init_beanie(database=db, document_models=DOCUMENTS)
     app.state.db = db
     app.state.http = httpx.AsyncClient(timeout=30, follow_redirects=False)
+    app.state.manual_sync_task = None
     if c.bootstrap_email:
         if not await db.users.find_one({'email': c.bootstrap_email}):
             hashed = await asyncio.to_thread(bcrypt.hashpw, c.bootstrap_password.encode(), bcrypt.gensalt())
@@ -190,6 +204,10 @@ async def lifespan(app):
     yield
     if scheduler.running:
         scheduler.shutdown(wait=False)
+    manual_sync_task = getattr(app.state, 'manual_sync_task', None)
+    if manual_sync_task and not manual_sync_task.done():
+        manual_sync_task.cancel()
+        await asyncio.gather(manual_sync_task, return_exceptions=True)
     await app.state.http.aclose()
     mongo.close()
 
@@ -281,9 +299,12 @@ async def overview(platform: Platform | None = None, user=Depends(current_user))
     prefs = await settings(db())
     pending = await db().posts.count_documents({**POST_SCOPE, 'sentiment': None, 'platform': {'$in': selected}, 'demo': config().seed_mock_data})
     await audit(db(), user, 'view.overview', {'platform': platform})
+    manual_sync_task = getattr(app.state, 'manual_sync_task', None)
+    is_syncing = sync_running() or bool(manual_sync_task and not manual_sync_task.done())
     return serialize(dict(demo=config().seed_mock_data, date=today(), timezone=config().reporting_timezone,
         sources=sources, today=grouped.get(today()), trend=sorted(grouped.values(), key=lambda x: x['date']),
         platform_totals=[r for r in rows if r['date'] == today()], pending=pending, threshold=prefs['threshold'],
+        sync_running=is_syncing,
         schedule=automation_schedule(),
         classifier=classifier_status(),
         partial=pending > 0 or any(s['status'] in ['unavailable', 'pending'] for s in sources if s['platform'] in selected),
@@ -368,11 +389,15 @@ async def credentials(value: CredentialInput, user=Depends(admin)):
     await audit(db(), user, 'credentials.rotate', {'platform': value.platform})
     return {'saved': True}
 
-@app.post('/api/sync')
+@app.post('/api/sync', status_code=202)
 async def run_sync(user=Depends(admin)):
     await audit(db(), user, 'ingestion.request')
-    await sync(db(), app.state.http)
-    return {'complete': True}
+    task = getattr(app.state, 'manual_sync_task', None)
+    if sync_running() or (task and not task.done()):
+        return {'accepted': True, 'running': True, 'started': False}
+    app.state.manual_sync_task = asyncio.create_task(
+        background_manual_sync(db(), app.state.http), name='manual-sync')
+    return {'accepted': True, 'running': True, 'started': True}
 
 @app.post('/api/alerts/{day}/resolve')
 async def resolve(day: date, user=Depends(admin)):

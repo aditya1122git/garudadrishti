@@ -2054,8 +2054,26 @@ body {
   color: var(--muted);
   font-size: 12px;
 }
-.profile-edit-button {
+.profile-header-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.profile-edit-button {
+  margin: 0;
+}
+.profile-password-button {
+  border: 1px solid #d8a13a;
+  background: #fff8e7;
+  color: #8a5a00;
+  font-weight: 600;
+}
+.profile-password-button:hover,
+.profile-password-button:focus-visible {
+  border-color: #bf8120;
+  background: #ffefc4;
+  color: #6f4700;
 }
 .profile-fields {
   display: grid;
@@ -2064,20 +2082,6 @@ body {
 }
 .profile-fields label {
   margin-bottom: 4px;
-}
-.change-password-button {
-  align-self: flex-start;
-  margin-top: 8px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--fb-blue);
-  font-size: 11px;
-  font-weight: 600;
-}
-.change-password-button:hover,
-.change-password-button:focus-visible {
-  text-decoration: underline;
 }
 .profile-password-heading {
   margin: 24px 0 16px;
@@ -2540,8 +2544,15 @@ body {
   .schedule-editor small {
     grid-column: 1 / -1;
   }
-  .profile-edit-button {
-    margin-left: auto;
+  .profile-header {
+    flex-wrap: wrap;
+  }
+  .profile-header-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+  .profile-header-actions .btn {
+    flex: 1;
   }
 }
 .post-author > span:last-child {

@@ -68,6 +68,13 @@ def test_viewer_cannot_mutate(client, auth):
     assert client.put('/api/settings', headers=viewer, json={'threshold': 10, 'keywords': ['PK']}).status_code == 403
 
 
+def test_admin_sync_is_accepted_as_background_work(client, auth):
+    response = client.post('/api/sync', headers=auth)
+    assert response.status_code == 202
+    assert response.json()['accepted'] is True
+    assert response.json()['running'] is True
+
+
 def test_no_secret_import_or_demo_credential_storage(client, auth):
     response = client.put('/api/credentials', headers=auth, json={'platform': 'youtube', 'api_key': 'secret-real-credential'})
     assert response.status_code == 409

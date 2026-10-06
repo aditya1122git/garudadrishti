@@ -80,6 +80,7 @@ type Overview = {
   pending: number;
   threshold: number;
   partial: boolean;
+  sync_running?: boolean;
   schedule?: {
     enabled: boolean;
     frequent: SyncScheduleItem | null;
@@ -142,6 +143,19 @@ async function api(path: string, options: RequestInit = {}) {
 }
 async function json(path: string, options: RequestInit = {}) {
   return (await api(path, options)).json();
+}
+
+async function overviewJson(path: string) {
+  let lastError: unknown;
+  for (const delay of [0, 800, 1800]) {
+    if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+    try {
+      return await json(path);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 const GlobalLoadingContext = React.createContext<
@@ -328,9 +342,11 @@ function Workspace({
   }, []);
   useEffect(() => {
     let active = true;
-    const finishLoading = beginLoading("Loading dashboard data…");
+    // Initial load uses the global overlay. Refresh/status polling stays in-place
+    // so a background sync never blocks the dashboard every five seconds.
+    const finishLoading = data ? () => undefined : beginLoading("Loading dashboard data…");
     setError("");
-    json("/overview" + (platform ? "?platform=" + platform : ""))
+    overviewJson("/overview" + (platform ? "?platform=" + platform : ""))
       .then((d) => {
         if (active) setData(d);
       })
@@ -345,9 +361,15 @@ function Workspace({
     const t = setInterval(() => setRevision((x) => x + 1), 60000);
     return () => clearInterval(t);
   }, []);
+  useEffect(() => {
+    if (!data?.sync_running) return;
+    const t = window.setInterval(() => setRevision((x) => x + 1), 5000);
+    return () => window.clearInterval(t);
+  }, [data?.sync_running]);
   async function refresh() {
     const finishLoading = beginLoading("Refreshing monitoring data…");
     setBusy(true);
+    setError("");
     try {
       if (session.role === "admin") await json("/sync", { method: "POST" });
       setRevision((x) => x + 1);
@@ -358,6 +380,7 @@ function Workspace({
       finishLoading();
     }
   }
+  const syncing = busy || !!data?.sync_running;
   const active = data?.alerts.find((a) => a.date === data.date),
     selectedSource = data?.sources.find((s) => s.platform === platform),
     disconnected = selectedSource?.status === "disconnected";
@@ -451,7 +474,7 @@ function Workspace({
                         : "Manage the terms and sources you monitor."}
               </p>
             </div>
-            <div className="heading-actions">
+            {(view === "overview" || view === "feed") && <div className="heading-actions">
               <div
                 className={`classification-progress ${!data || data.pending ? "active" : "complete"}`}
                 aria-label={!data ? "Classification status is loading" : data.pending ? `${num(data.pending)} posts remaining for classification` : "Classification is up to date"}
@@ -466,19 +489,21 @@ function Workspace({
               </div>
               <button
                 onClick={refresh}
-                disabled={busy}
+                  disabled={syncing}
                 aria-label="Refresh monitoring data"
               >
-                <RefreshCw size={16} className={busy ? "spin" : ""} />
-                {busy ? "Refreshing…" : "Refresh"}
+                  <RefreshCw size={16} className={syncing ? "spin" : ""} />
+                  {syncing ? "Refreshing…" : "Refresh"}
               </button>
               <button className="btn btn-primary primary" onClick={() => setReport(true)}>
                 <Download size={16} />
                 Export report
               </button>
-            </div>
+            </div>}
           </div>
-          {data?.schedule?.enabled && <SyncScheduleProgress schedule={data.schedule} />}
+          {(view === "overview" || view === "feed") && data?.schedule?.enabled && (
+            <SyncScheduleProgress schedule={data.schedule} />
+          )}
           {error && (
             <div className="error" role="alert">
               {error}{" "}
@@ -1071,7 +1096,7 @@ function Feed({
   const [q, setQ] = useState(""),
     [term, setTerm] = useState(""),
     [sentiment, setSentiment] = useState(""),
-    [sort, setSort] = useState("engagement"),
+    [sort, setSort] = useState("recency"),
     [day, setDay] = useState(defaultDay),
     [page, setPage] = useState(1),
     [posts, setPosts] = useState<{ items: Post[]; total: number } | null>(null),
@@ -1154,8 +1179,8 @@ function Feed({
           value={sort}
           onChange={(e) => setSort(e.target.value)}
         >
-          <option value="engagement">Most engaged</option>
           <option value="recency">Most recent</option>
+          <option value="engagement">Most engaged</option>
         </select>
         {!compact && (
           <input className="form-control"
@@ -1481,11 +1506,19 @@ function ProfilePanel({
           <p>{session.role === "admin" ? "Administrator account" : "Viewer account"}</p>
         </div>
         {!editing && !confirmation && (
-          <button type="button" className="btn btn-outline-primary profile-edit-button" onClick={() => {
-            setEditing(true);
-            setMessage("");
-            setError("");
-          }}>Edit profile</button>
+          <div className="profile-header-actions">
+            <button type="button" className="btn btn-outline-primary profile-edit-button" onClick={() => {
+              setEditing(true);
+              setMessage("");
+              setError("");
+            }}>Edit profile</button>
+            <button type="button" className="btn profile-password-button" onClick={() => {
+              clearSecurityForm();
+              setConfirmation("password");
+              setMessage("");
+              setError("");
+            }}>Change password</button>
+          </div>
         )}
       </div>
 
@@ -1501,14 +1534,6 @@ function ProfilePanel({
           <input className="form-control" type="email" required autoComplete="email"
             disabled={!editing || confirmation !== null} value={profile.email}
             onChange={(e) => setProfile({ ...profile, email: e.target.value })} />
-          {!editing && !confirmation && (
-            <button type="button" className="change-password-button" onClick={() => {
-              clearSecurityForm();
-              setConfirmation("password");
-              setMessage("");
-              setError("");
-            }}>Change password</button>
-          )}
         </label>
       </div>
 
