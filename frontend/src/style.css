@@ -419,6 +419,56 @@ main {
   from { transform: translateX(-110%); }
   to { transform: translateX(260%); }
 }
+.sync-schedule {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: -10px 0 24px;
+}
+.sync-schedule-item {
+  padding: 10px 13px;
+  border: 1px solid #d9e0e8;
+  border-radius: 6px;
+  background: #fff;
+}
+.sync-schedule-copy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+}
+.sync-schedule-copy span {
+  color: var(--ink);
+  font-weight: 600;
+}
+.sync-schedule-copy strong {
+  color: #1877f2;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.sync-schedule-track {
+  height: 5px;
+  margin: 7px 0 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e6ebf1;
+}
+.sync-schedule-track i {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: #1877f2;
+  transition: width 1s linear;
+}
+.sync-schedule-item:nth-child(2) .sync-schedule-track i {
+  background: #2f9278;
+}
+.sync-schedule-item small {
+  color: var(--muted);
+  font-size: 10px;
+}
 .alert-banner {
   border: 1px solid #eac6c3;
   border-left: 4px solid #c9534a;
@@ -1600,6 +1650,10 @@ dialog::backdrop {
   }
   .classification-progress {
     width: 100%;
+  }
+  .sync-schedule {
+    grid-template-columns: 1fr;
+    margin-top: -6px;
   }
   .heading-actions button {
     flex: 1;

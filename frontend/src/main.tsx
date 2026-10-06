@@ -80,6 +80,11 @@ type Overview = {
   pending: number;
   threshold: number;
   partial: boolean;
+  schedule?: {
+    enabled: boolean;
+    frequent: SyncScheduleItem | null;
+    social: SyncScheduleItem | null;
+  };
   classifier: {
     status: string;
     model: string;
@@ -88,6 +93,11 @@ type Overview = {
     fallback_configured?: boolean;
   };
   alerts: Alert[];
+};
+type SyncScheduleItem = {
+  label: string;
+  interval_seconds: number;
+  next_run_at: string | null;
 };
 const names: Record<string, string> = {
   facebook: "Facebook",
@@ -151,6 +161,50 @@ function GlobalLoader({ message }: { message: string }) {
         </span>
       </div>
     </div>
+  );
+}
+
+function SyncScheduleProgress({ schedule }: { schedule: NonNullable<Overview["schedule"]> }) {
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const items = [schedule.frequent, schedule.social].filter(Boolean) as SyncScheduleItem[];
+  function timing(item: SyncScheduleItem) {
+    if (!item.next_run_at) return { progress: 0, copy: "Schedule unavailable", seconds: 0 };
+    const remaining = Math.max(0, Math.ceil((new Date(item.next_run_at).getTime() - clock) / 1000));
+    const progress = Math.max(0, Math.min(100, (1 - remaining / item.interval_seconds) * 100));
+    if (remaining <= 0) return { progress: 100, copy: "Starting now", seconds: 0 };
+    const hours = Math.floor(remaining / 3600);
+    const minutes = Math.floor((remaining % 3600) / 60);
+    const seconds = remaining % 60;
+    const copy = hours
+      ? `Next in ${hours}h ${minutes}m`
+      : `Next in ${minutes}m ${String(seconds).padStart(2, "0")}s`;
+    return { progress, copy, seconds: remaining };
+  }
+
+  return (
+    <section className="sync-schedule" aria-label="Automatic data collection schedule">
+      {items.map((item) => {
+        const state = timing(item);
+        return (
+          <div className="sync-schedule-item" key={item.label}>
+            <div className="sync-schedule-copy">
+              <span>{item.label}</span>
+              <strong>{state.copy}</strong>
+            </div>
+            <div className="sync-schedule-track" role="progressbar" aria-label={`${item.label} next automatic fetch`}
+              aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(state.progress)}>
+              <i style={{ width: `${state.progress}%` }} />
+            </div>
+            <small>{item.interval_seconds === 900 ? "Every 15 minutes" : "Every 4 hours"}</small>
+          </div>
+        );
+      })}
+    </section>
   );
 }
 
@@ -424,6 +478,7 @@ function Workspace({
               </button>
             </div>
           </div>
+          {data?.schedule?.enabled && <SyncScheduleProgress schedule={data.schedule} />}
           {error && (
             <div className="error" role="alert">
               {error}{" "}

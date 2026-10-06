@@ -12,7 +12,7 @@ from app.config import Config
 from app.models import now
 from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window
 from app.sentiment import Classifier
-from app.connectors import NEWS_CHANNELS, matches, apify_posts, google_news_posts, _actor_input, ProviderError, request
+from app.connectors import NEWS_CHANNELS, NEWS_SEARCH_QUERIES, matches, apify_posts, google_news_posts, _actor_input, ProviderError, request
 
 
 def test_timezone_boundary():
@@ -244,9 +244,11 @@ async def test_google_news_rss_input_and_output_mapping():
           </item></channel></rss>''')
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         rows = await google_news_posts(client, ['Jan Suraaj', 'Prashant Kishore'], now() - timedelta(days=1))
-    assert len(captured) == len(NEWS_CHANNELS)
+    assert len(captured) == len(NEWS_SEARCH_QUERIES)
     assert all(req.url.host == 'news.google.com' for req in captured)
     assert all(req.url.params['ceid'] == 'IN:hi' for req in captured)
+    assert all(not any(channel in req.url.params['q'] for channel in NEWS_CHANNELS)
+               for req in captured)
     assert rows[0]['author'] == 'News18 Bihar Jharkhand'
     assert rows[0]['url'] == 'https://news.google.com/rss/articles/story'
     assert rows[0]['content'] == 'Prashant Kishore addresses Bihar rally'

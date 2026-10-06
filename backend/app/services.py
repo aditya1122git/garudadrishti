@@ -201,6 +201,8 @@ async def sync(db, client, platforms=None):
                         secret = decrypt(c['encrypted_api_key'])
                         if p == 'youtube' and c.get('search_strategy') != 'keyword-and-short-v3':
                             since = now() - timedelta(days=config().youtube_initial_lookback_days)
+                        elif p == 'news' and c.get('search_strategy') != 'entity-rss-v2':
+                            since = now() - timedelta(days=7)
                         else:
                             since = c.get('last_synced_at') or now() - timedelta(hours=24)
                         since -= timedelta(minutes=5)  # deliberate overlap; compound unique index deduplicates
@@ -223,6 +225,8 @@ async def sync(db, client, platforms=None):
                                              'encrypted_api_key': encrypt(secret)}
                         if p == 'youtube':
                             credential_update['search_strategy'] = 'keyword-and-short-v3'
+                        elif p == 'news':
+                            credential_update['search_strategy'] = 'entity-rss-v2'
                         await db.platform_credentials.update_one({'_id': c['_id']}, {'$set': credential_update})
                     except Exception as exc:
                         await db.platform_credentials.update_one({'_id': c['_id']}, {'$set': {'status': 'unavailable',

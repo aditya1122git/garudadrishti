@@ -53,6 +53,33 @@ def configure_automation_jobs(scheduler, database, client, start_hour: int, end_
         )
 
 
+def automation_schedule():
+    """Expose the scheduler's real next run times for dashboard countdowns."""
+    scheduler = getattr(app.state, 'scheduler', None)
+    if not scheduler or not config().scheduler_enabled:
+        return {'enabled': False, 'frequent': None, 'social': None}
+
+    def next_time(*job_ids):
+        times = []
+        for job_id in job_ids:
+            job = scheduler.get_job(job_id)
+            if job and job.next_run_time:
+                times.append(job.next_run_time)
+        return min(times).isoformat() if times else None
+
+    return {
+        'enabled': True,
+        'frequent': {
+            'label': 'YouTube + News', 'interval_seconds': 15 * 60,
+            'next_run_at': next_time('all-sources-4h', 'youtube-news-quarter-hour', 'youtube-news-full-hour'),
+        },
+        'social': {
+            'label': 'Facebook + Instagram + X', 'interval_seconds': 4 * 60 * 60,
+            'next_run_at': next_time('all-sources-4h'),
+        },
+    }
+
+
 @asynccontextmanager
 async def lifespan(app):
     c = config()
@@ -125,6 +152,13 @@ async def lifespan(app):
             platform='news', mode='official', encrypted_api_key=encrypt({}), status='pending',
             error=None,
         ), '$unset': {'last_attempt_at': ''}}, upsert=True)
+        # The previous channel-name query was not a real publisher filter and
+        # could repeatedly store zero rows. Give the corrected entity-query
+        # strategy one bounded backfill, including on existing deployments.
+        await db.platform_credentials.update_one({
+            'platform': 'news', 'search_strategy': {'$ne': 'entity-rss-v2'},
+        }, {'$set': {'last_synced_at': None, 'status': 'pending'},
+            '$unset': {'last_attempt_at': ''}})
     if not c.seed_mock_data and 'youtube' in c.enabled_platforms.split(','):
         # One-time scope upgrade: refresh the last day using complete video snippets.
         await db.platform_credentials.update_one({'platform': 'youtube',
@@ -250,6 +284,7 @@ async def overview(platform: Platform | None = None, user=Depends(current_user))
     return serialize(dict(demo=config().seed_mock_data, date=today(), timezone=config().reporting_timezone,
         sources=sources, today=grouped.get(today()), trend=sorted(grouped.values(), key=lambda x: x['date']),
         platform_totals=[r for r in rows if r['date'] == today()], pending=pending, threshold=prefs['threshold'],
+        schedule=automation_schedule(),
         classifier=classifier_status(),
         partial=pending > 0 or any(s['status'] in ['unavailable', 'pending'] for s in sources if s['platform'] in selected),
         alerts=await db().alerts.find({'resolved': False, 'content_scope': 'youtube-title-only-v2'}).sort('date', -1).limit(30).to_list(30)))

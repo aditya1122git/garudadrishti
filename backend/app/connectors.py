@@ -7,6 +7,7 @@ import json
 import random
 import re
 import time
+import math
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote
@@ -25,6 +26,13 @@ NEWS_CHANNELS = (
     'News18', 'Zee Bihar', 'ABP Bihar', 'News State', 'Sahara Samay',
     'Bihar Tak', 'First Bihar', 'Live Cities', 'News4Nation',
     'Hindustani Media',
+)
+
+NEWS_SEARCH_QUERIES = (
+    '"Jan Suraaj" OR "Jan Suraj"',
+    '"Prashant Kishore"',
+    '"जन सुराज"',
+    '"प्रशांत किशोर"',
 )
 
 NEWS_SOURCE_ALIASES = {
@@ -159,10 +167,13 @@ def _rss_text(value):
 
 async def google_news_posts(client, keywords, since):
     """Fetch approved Bihar publishers from Google News public RSS search feeds."""
-    keyword_query = ' OR '.join(f'"{term}"' for term in keywords)
+    lookback_days = min(7, max(1, math.ceil((datetime.now(timezone.utc) - since).total_seconds() / 86400)))
 
-    async def fetch(channel):
-        query = f'({keyword_query}) "{channel}" when:1d'
+    async def fetch(entity_query):
+        # Google News does not treat a quoted publisher name as a reliable
+        # source filter. Query each tracked entity and validate the RSS
+        # <source> metadata against the approved publisher allow-list instead.
+        query = f'({entity_query}) when:{lookback_days}d'
         xml = await request(client, 'GET', 'https://news.google.com/rss/search', params={
             'q': query, 'hl': 'hi', 'gl': 'IN', 'ceid': 'IN:hi',
         }, headers={'Accept': 'application/rss+xml, application/xml;q=0.9'}, response_text=True)
@@ -194,7 +205,7 @@ async def google_news_posts(client, keywords, since):
             found.append(row)
         return found
 
-    results = await asyncio.gather(*(fetch(channel) for channel in NEWS_CHANNELS))
+    results = await asyncio.gather(*(fetch(query) for query in NEWS_SEARCH_QUERIES))
     unique = {}
     for rows in results:
         for row in rows:
