@@ -6,10 +6,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import model_validator
 
 DEFAULT_APIFY_ACTORS = {
-    'facebook': 'apify~facebook-search-scraper',
-    'instagram': 'data-slayer~instagram-keyword-posts-scraper',
+    'facebook': 'apify~facebook-posts-scraper',
+    'instagram': 'apify~instagram-scraper',
     'x': 'apidojo~tweet-scraper',
 }
+APIFY_FACEBOOK_DISCOVERY_ACTOR = 'apify~facebook-search-scraper'
+APIFY_FACEBOOK_DISCOVERY_LIMIT = 12
+APIFY_MAX_ITEMS = 50
+APIFY_RUN_TIMEOUT_SECONDS = 240
+APIFY_SYNC_INTERVAL_HOURS = 4
+DEFAULT_AUTOMATION_START_HOUR = 6
+DEFAULT_AUTOMATION_END_HOUR = 22
 
 
 class Config(BaseSettings):
@@ -31,25 +38,12 @@ class Config(BaseSettings):
     hf_max_length: int = 256
     hf_cpu_threads: int = 2
     hf_local_files_only: bool = False
-    sarcasm_model: str = 'ashish5193/sarcasm_model'
-    sarcasm_revision: str = '6e8df8df0e3ff4adf248a15f06057cd6b7b173b2'
-    sarcasm_tokenizer_model: str = 'cardiffnlp/twitter-roberta-base-sentiment-latest'
-    sarcasm_tokenizer_revision: str = '3216a57f2a0d9c45a2e6c20157c20c49fb4bf9c7'
-    sarcasm_confidence_threshold: float = 0.65
-    groq_api_key: str = ''
-    groq_model: str = 'qwen/qwen3.8-27b'
-    hf_confidence_threshold: float = 0.60
-    groq_concurrency: int = 2
+    gemini_api_key: str = ''
+    gemini_model: str = 'gemini-3.5-flash-lite'
+    hf_confidence_threshold: float = 0.80
+    gemini_concurrency: int = 2
     enabled_platforms: str = 'facebook,instagram,x,youtube,news'
     apify_api_token: str = ''
-    apify_facebook_actor_id: str = ''
-    apify_instagram_actor_id: str = ''
-    apify_x_actor_id: str = ''
-    apify_facebook_input_json: str = ''
-    apify_instagram_input_json: str = ''
-    apify_x_input_json: str = ''
-    apify_max_items: int = 50
-    apify_run_timeout_seconds: int = 240
     youtube_api_key: str = ''
     youtube_initial_lookback_days: int = 7
     youtube_terms_per_query: int = 4
@@ -58,10 +52,7 @@ class Config(BaseSettings):
     allowed_origins: str = 'http://localhost:5173,http://localhost:8080'
     reporting_timezone: str = 'Asia/Kolkata'
     scheduler_enabled: bool = True
-    automation_start_hour: int = 6
-    automation_end_hour: int = 22
     youtube_sync_interval_minutes: int = 15
-    apify_sync_interval_hours: int = 4
 
     @model_validator(mode='after')
     def secure_defaults(self):
@@ -90,34 +81,20 @@ class Config(BaseSettings):
         if not 1 <= self.hf_cpu_threads <= 32:
             raise ValueError('HF_CPU_THREADS must be 1..32')
         if (not 0 <= self.hf_confidence_threshold <= 1
-                or not 0 <= self.sarcasm_confidence_threshold <= 1
-                or not 1 <= self.groq_concurrency <= 8):
+                or not 1 <= self.gemini_concurrency <= 8):
             raise ValueError('Invalid classifier threshold/concurrency')
         if not 1 <= self.youtube_initial_lookback_days <= 30 or not 1 <= self.youtube_terms_per_query <= 5:
             raise ValueError('Invalid YouTube search coverage settings')
         if set(self.enabled_platforms.split(',')) - {'facebook', 'instagram', 'x', 'youtube', 'news'}:
             raise ValueError('Invalid ENABLED_PLATFORMS')
-        if not 1 <= self.apify_max_items <= 1000 or not 30 <= self.apify_run_timeout_seconds <= 300:
-            raise ValueError('Invalid Apify run limits')
-        if (not 0 <= self.automation_start_hour < self.automation_end_hour <= 23
-                or self.youtube_sync_interval_minutes != 15
-                or self.apify_sync_interval_hours != 4
-                or (self.automation_end_hour - self.automation_start_hour) % self.apify_sync_interval_hours):
-            raise ValueError('Automation window must support 15-minute YouTube and 4-hour Apify schedules')
-        # A single token is enough for the standard setup. Explicit environment
-        # values remain available when an operator wants to swap an Actor.
-        for platform, actor_id in DEFAULT_APIFY_ACTORS.items():
-            field = f'apify_{platform}_actor_id'
-            if not getattr(self, field).strip():
-                setattr(self, field, actor_id)
+        if self.youtube_sync_interval_minutes != 15:
+            raise ValueError('YouTube sync interval must remain 15 minutes')
         if self.hf_device not in ('cpu', 'cuda', 'mps'):
             raise ValueError('HF_DEVICE must be cpu, cuda, or mps')
         if not all(value.strip() for value in (
-            self.hf_model, self.hf_revision, self.sarcasm_model,
-            self.sarcasm_revision, self.sarcasm_tokenizer_model,
-            self.sarcasm_tokenizer_revision,
+            self.hf_model, self.hf_revision, self.gemini_model,
         )):
-            raise ValueError('Sentiment and sarcasm model names/revisions are required')
+            raise ValueError('HF and Gemini model names/revisions are required')
         return self
 
 

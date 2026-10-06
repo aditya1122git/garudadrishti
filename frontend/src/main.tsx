@@ -55,9 +55,6 @@ type Post = {
     confidence: number;
     reason: string;
     model_used: string;
-    sarcasm_detected?: boolean;
-    sarcasm_confidence?: number;
-    sarcasm_model_confidence?: number;
     language?: "hi" | "en" | "hinglish";
     targets?: string[];
     review_required?: boolean;
@@ -89,8 +86,6 @@ type Overview = {
     threshold?: number;
     fallback_model?: string;
     fallback_configured?: boolean;
-    sarcasm_model?: string;
-    sarcasm_threshold?: number;
   };
   alerts: Alert[];
 };
@@ -801,7 +796,7 @@ function Workspace({
                                         (s) => s.status !== "disconnected",
                                       ).length
                                     }{" "}
-                                    of 4 connected
+                                    of {data.sources.length} connected
                                   </span>
                                 </div>
                                 <div className="source-grid">
@@ -1157,14 +1152,11 @@ function Feed({
                     </span>
                     <small title={p.sentiment.reason}>
                       {Math.round(p.sentiment.confidence * 100)}% confidence
-                      {p.sentiment.sarcasm_detected
-                        ? ` · Sarcasm ${Math.round((p.sentiment.sarcasm_confidence || 0) * 100)}%`
-                        : ""}
                       {p.sentiment.review_required ? " · Review" : ""}
                     </small>
                   </>
                 ) : (
-                  <span className="muted">{p.classification_status === "awaiting_groq" ? "Awaiting Groq" : "Pending"}</span>
+                  <span className="muted">{p.classification_status === "awaiting_gemini" ? "Awaiting Gemini" : "Pending"}</span>
                 )}
               </div>
               <div>
@@ -1317,48 +1309,75 @@ function ProfilePanel({
 }) {
   const beginLoading = React.useContext(GlobalLoadingContext);
   const [profile, setProfile] = useState({ name: session.name, email: session.email });
+  const [savedProfile, setSavedProfile] = useState({ name: session.name, email: session.email });
+  const [editing, setEditing] = useState(false);
+  const [confirmation, setConfirmation] = useState<"profile" | "password" | null>(null);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [showPasswords, setShowPasswords] = useState(false);
+  const [visiblePasswords, setVisiblePasswords] = useState({ current: false, next: false, confirm: false });
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const finishLoading = beginLoading("Loading your profileâ€¦");
+    const finishLoading = beginLoading("Loading your profile?");
     json("/profile")
-      .then((value) => setProfile({ name: value.name, email: value.email }))
+      .then((value) => {
+        const loaded = { name: value.name, email: value.email };
+        setProfile(loaded);
+        setSavedProfile(loaded);
+      })
       .catch((e) => setError(e.message))
       .finally(finishLoading);
     return finishLoading;
   }, [beginLoading]);
 
-  async function save(e: React.FormEvent) {
-    e.preventDefault();
+  function clearSecurityForm() {
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+    setVisiblePasswords({ current: false, next: false, confirm: false });
+  }
+
+  async function confirmSave(mode: "profile" | "password") {
     setError("");
     setMessage("");
-    if (newPassword !== confirmPassword) {
-      setError("New password and confirmation do not match.");
-      return;
+    if (mode === "password") {
+      if (newPassword !== confirmPassword) {
+        setError("New password and confirmation do not match.");
+        return;
+      }
+      if (newPassword.length < 8 || newPassword.length > 14) {
+        setError("New password must contain 8 to 14 characters.");
+        return;
+      }
     }
-    const finishLoading = beginLoading("Updating your profileâ€¦");
+    const finishLoading = beginLoading(mode === "profile" ? "Updating your profile?" : "Changing your password?");
     setSaving(true);
     try {
+      const target = mode === "profile" ? profile : savedProfile;
       const result = await json("/profile", {
         method: "PUT",
         body: JSON.stringify({
-          name: profile.name,
-          email: profile.email,
+          name: target.name,
+          email: target.email,
           current_password: currentPassword,
-          new_password: newPassword,
+          new_password: mode === "password" ? newPassword : "",
         }),
       });
-      onSaved({ role: result.role, name: result.name, email: result.email });
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-      setMessage("Profile updated successfully.");
+      if (mode === "profile") {
+        const saved = { name: result.name, email: result.email };
+        setProfile(saved);
+        setSavedProfile(saved);
+        onSaved({ role: result.role, ...saved });
+        setEditing(false);
+        setMessage("Profile updated successfully.");
+      } else {
+        setMessage("Password changed successfully.");
+      }
+      setConfirmation(null);
+      clearSecurityForm();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -1367,63 +1386,139 @@ function ProfilePanel({
     }
   }
 
+  function PasswordInput({
+    fieldKey,
+    label,
+    value,
+    setValue,
+    autoComplete,
+  }: {
+    fieldKey: "current" | "next" | "confirm";
+    label: string;
+    value: string;
+    setValue: (value: string) => void;
+    autoComplete: string;
+  }) {
+    return (
+      <label>
+        {label}
+        <span className="profile-password-field">
+          <input className="form-control" type={visiblePasswords[fieldKey] ? "text" : "password"}
+            required minLength={fieldKey === "current" ? 1 : 8}
+            maxLength={fieldKey === "current" ? 72 : 14}
+            autoComplete={autoComplete} value={value}
+            onChange={(e) => setValue(e.target.value)} />
+          <button type="button" aria-label={`${visiblePasswords[fieldKey] ? "Hide" : "Show"} ${label.toLowerCase()}`}
+            onClick={() => setVisiblePasswords((state) => ({ ...state, [fieldKey]: !state[fieldKey] }))}>
+            {visiblePasswords[fieldKey] ? <EyeSlash size={17} /> : <Eye size={17} />}
+          </button>
+        </span>
+      </label>
+    );
+  }
+
   return (
     <section className="panel profile-panel">
       <div className="profile-header">
         <span className="profile-avatar">{(profile.name || profile.email)[0]?.toUpperCase()}</span>
         <div>
-          <h2>{profile.name || "Administrator"}</h2>
+          <h2>{savedProfile.name || "Administrator"}</h2>
           <p>{session.role === "admin" ? "Administrator account" : "Viewer account"}</p>
         </div>
+        {!editing && !confirmation && (
+          <button type="button" className="btn btn-outline-primary profile-edit-button" onClick={() => {
+            setEditing(true);
+            setMessage("");
+            setError("");
+          }}>Edit profile</button>
+        )}
       </div>
-      <form onSubmit={save} autoComplete="off">
-        <div className="profile-fields">
-          <label>
-            Full name
-            <input className="form-control" minLength={2} maxLength={80} required
-              value={profile.name} onChange={(e) => setProfile({ ...profile, name: e.target.value })} />
-          </label>
-          <label>
-            Email address
-            <input className="form-control" type="email" required autoComplete="email"
-              value={profile.email} onChange={(e) => setProfile({ ...profile, email: e.target.value })} />
-          </label>
-        </div>
-        <div className="profile-password-heading">
-          <div><strong>Security</strong><p>Enter your current password to save profile changes.</p></div>
-          <button type="button" onClick={() => setShowPasswords((value) => !value)}>
-            {showPasswords ? <EyeSlash size={16} /> : <Eye size={16} />}
-            {showPasswords ? "Hide passwords" : "Show passwords"}
-          </button>
-        </div>
-        <div className="profile-fields profile-passwords">
-          <label>
-            Current password
-            <input className="form-control" type={showPasswords ? "text" : "password"} required
-              autoComplete="current-password" value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)} />
-          </label>
-          <label>
-            New password <small>Optional, minimum 14 characters</small>
-            <input className="form-control" type={showPasswords ? "text" : "password"}
-              minLength={newPassword ? 14 : undefined} autoComplete="new-password" value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)} />
-          </label>
-          <label>
-            Confirm new password
-            <input className="form-control" type={showPasswords ? "text" : "password"}
-              minLength={newPassword ? 14 : undefined} autoComplete="new-password" value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)} />
-          </label>
-        </div>
-        {error && <p className="error" role="alert">{error}</p>}
-        {message && <p className="success" role="status"><Check size={16} />{message}</p>}
+
+      <div className="profile-fields">
+        <label>
+          Full name
+          <input className="form-control" minLength={2} maxLength={80} required
+            disabled={!editing || confirmation !== null} value={profile.name}
+            onChange={(e) => setProfile({ ...profile, name: e.target.value })} />
+        </label>
+        <label>
+          Email address
+          <input className="form-control" type="email" required autoComplete="email"
+            disabled={!editing || confirmation !== null} value={profile.email}
+            onChange={(e) => setProfile({ ...profile, email: e.target.value })} />
+          {!editing && !confirmation && (
+            <button type="button" className="change-password-button" onClick={() => {
+              clearSecurityForm();
+              setConfirmation("password");
+              setMessage("");
+              setError("");
+            }}>Change password</button>
+          )}
+        </label>
+      </div>
+
+      {editing && !confirmation && (
         <div className="profile-actions">
-          <button className="btn btn-primary primary" disabled={saving}>
-            {saving ? "Savingâ€¦" : "Save profile"}
-          </button>
+          <button type="button" className="btn btn-light" onClick={() => {
+            setProfile(savedProfile);
+            setEditing(false);
+            setError("");
+          }}>Cancel</button>
+          <button type="button" className="btn btn-primary primary" onClick={() => {
+            if (profile.name.trim().length < 2 || !profile.email.includes("@")) {
+              setError("Enter a valid name and email address.");
+              return;
+            }
+            clearSecurityForm();
+            setConfirmation("profile");
+            setError("");
+          }}>Save profile</button>
         </div>
-      </form>
+      )}
+
+      {confirmation === "profile" && (
+        <div className="profile-confirmation-box">
+          <div><strong>Confirm profile changes</strong><p>Enter your current password before updating your name or email.</p></div>
+          <PasswordInput fieldKey="current" label="Current password" value={currentPassword}
+            setValue={setCurrentPassword} autoComplete="current-password" />
+          <div className="profile-actions">
+            <button type="button" className="btn btn-light" disabled={saving} onClick={() => {
+              setConfirmation(null);
+              clearSecurityForm();
+              setError("");
+            }}>Cancel</button>
+            <button type="button" className="btn btn-primary primary" disabled={saving || !currentPassword}
+              onClick={() => confirmSave("profile")}>{saving ? "Confirming?" : "Confirm"}</button>
+          </div>
+        </div>
+      )}
+
+      {confirmation === "password" && (
+        <div className="profile-confirmation-box password-change-box">
+          <div><strong>Change password</strong><p>Use 8 to 14 characters for the new password.</p></div>
+          <div className="profile-fields profile-passwords">
+            <PasswordInput fieldKey="current" label="Current password" value={currentPassword}
+              setValue={setCurrentPassword} autoComplete="current-password" />
+            <PasswordInput fieldKey="next" label="New password" value={newPassword}
+              setValue={setNewPassword} autoComplete="new-password" />
+            <PasswordInput fieldKey="confirm" label="Confirm new password" value={confirmPassword}
+              setValue={setConfirmPassword} autoComplete="new-password" />
+          </div>
+          <div className="profile-actions">
+            <button type="button" className="btn btn-light" disabled={saving} onClick={() => {
+              setConfirmation(null);
+              clearSecurityForm();
+              setError("");
+            }}>Cancel</button>
+            <button type="button" className="btn btn-primary primary"
+              disabled={saving || !currentPassword || newPassword.length < 8 || newPassword.length > 14 || newPassword !== confirmPassword}
+              onClick={() => confirmSave("password")}>{saving ? "Saving?" : "Save password"}</button>
+          </div>
+        </div>
+      )}
+
+      {error && <p className="error" role="alert">{error}</p>}
+      {message && <p className="success" role="status"><Check size={16} />{message}</p>}
     </section>
   );
 }
@@ -1438,6 +1533,9 @@ function SettingsPanel({
   const beginLoading = React.useContext(GlobalLoadingContext);
   const [prefs, setPrefs] = useState<any>(null),
     [terms, setTerms] = useState(""),
+    [startHour, setStartHour] = useState(6),
+    [endHour, setEndHour] = useState(22),
+    [editing, setEditing] = useState(false),
     [message, setMessage] = useState(""),
     [error, setError] = useState(""),
     [saving, setSaving] = useState(false),
@@ -1447,6 +1545,8 @@ function SettingsPanel({
     json("/settings")
       .then((p) => {
         setPrefs(p);
+        setStartHour(p.automation_start_hour ?? 6);
+        setEndHour(p.automation_end_hour ?? 22);
         setTerms(
           p.keywords
             .filter((k: any) => k.is_active)
@@ -1471,9 +1571,18 @@ function SettingsPanel({
         method: "PUT",
         body: JSON.stringify({
           keywords: terms.split("\n").filter(Boolean),
+          automation_start_hour: startHour,
+          automation_end_hour: endHour,
         }),
       });
-      setMessage("Tracked terms saved. Changes take effect on the next sync.");
+      setPrefs({
+        ...prefs,
+        automation_start_hour: startHour,
+        automation_end_hour: endHour,
+        keywords: terms.split("\n").filter(Boolean).map((keyword) => ({ keyword, is_active: true })),
+      });
+      setEditing(false);
+      setMessage("Settings saved. The automatic schedule has been updated.");
       onSaved();
     } catch (e) {
       setError((e as Error).message);
@@ -1487,22 +1596,41 @@ function SettingsPanel({
       <form onSubmit={save} className="settings-grid" autoComplete="off">
         <section className="panel settings-section tracked-terms-section">
           <div className="panel-title">
-            <h2>Tracked terms</h2>
-            <span>Hindi · English · Hinglish</span>
+            <div><h2>Monitoring settings</h2><span>Hindi · English · Hinglish</span></div>
+            {admin && !editing && <button type="button" className="btn btn-outline-primary"
+              onClick={() => { setEditing(true); setMessage(""); setError(""); }}>Edit settings</button>}
           </div>
-          <p>
-            One term per line. “PK” may include unrelated mentions; review
-            low-confidence results.
-          </p>
+
           <label>
             Keywords and hashtags
             <textarea className="form-control"
               rows={9}
               value={terms}
               onChange={(e) => setTerms(e.target.value)}
-              disabled={!admin}
+              disabled={!admin || !editing}
             />
           </label>
+          <div className="schedule-editor">
+            <div>
+              <strong>Active automation window</strong>
+              <p>YouTube and Google News run every 15 minutes. Other social sources run every 4 hours.</p>
+            </div>
+            <label>
+              Start time
+              <select className="form-select" value={startHour}
+                disabled={!admin || !editing} onChange={(e) => setStartHour(Number(e.target.value))}>
+                {Array.from({ length: 23 }, (_, hour) => <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>)}
+              </select>
+            </label>
+            <label>
+              End time
+              <select className="form-select" value={endHour}
+                disabled={!admin || !editing} onChange={(e) => setEndHour(Number(e.target.value))}>
+                {Array.from({ length: 23 }, (_, index) => index + 1).map((hour) => <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>)}
+              </select>
+            </label>
+            <small>Timezone: {prefs.timezone || "Asia/Kolkata"}</small>
+          </div>
         </section>
         <div className="settings-save">
           {error && (
@@ -1516,13 +1644,20 @@ function SettingsPanel({
               {message}
             </p>
           )}
-          {admin ? (
-            <button className="btn btn-primary primary" disabled={saving}>
+          {admin && editing ? (<>
+            <button type="button" className="btn btn-light" disabled={saving} onClick={() => {
+              setTerms(prefs.keywords.filter((k: any) => k.is_active).map((k: any) => k.keyword).join("\n"));
+              setStartHour(prefs.automation_start_hour ?? 6);
+              setEndHour(prefs.automation_end_hour ?? 22);
+              setEditing(false);
+              setError("");
+            }}>Cancel</button>
+            <button className="btn btn-primary primary" disabled={saving || startHour >= endHour}>
               {saving ? "Saving…" : "Save settings"}
             </button>
-          ) : (
+          </>) : !admin ? (
             <p>Viewer access · Ask an administrator to change settings.</p>
-          )}
+          ) : null}
         </div>
       </form>
       <section className="panel settings-section connections">
@@ -1543,7 +1678,7 @@ function SettingsPanel({
                       ? "Official Data API v3 - quota-aware schedule"
                       : key === "news"
                         ? "Google News RSS - automatic, no API key required"
-                      : "Apify Actor - configured source monitoring"}
+                        : "Apify Actor - configured source monitoring"}
                   </p>
                 </div>
                 <span>
@@ -1558,9 +1693,6 @@ function SettingsPanel({
                       platform: key,
                       mode: key === "youtube" ? "official" : "apify",
                       api_key: "",
-                      actor_id: "",
-                      input_template: "",
-                      max_items: 200,
                     })
                   }
                 >
@@ -1572,12 +1704,11 @@ function SettingsPanel({
         )}
       </section>
       <section className="panel settings-section connections">
-        <div className="panel-title"><h2>Sentiment classifier</h2><span>Sentiment + sarcasm + Groq fallback</span></div>
+        <div className="panel-title"><h2>Sentiment classifier</h2><span>Hugging Face + Gemini verifier</span></div>
         <strong>{prefs.model}</strong>
         <p>Status: {prefs.classifier?.status || "pending"}</p>
-        <p>Sarcasm detector: {prefs.classifier?.sarcasm_model || "ashish5193/sarcasm_model"}</p>
-        <p>YouTube uses video titles only. Local sentiment, language, entity and sarcasm signals produce target-wise sentiment. Only combined confidence below {Math.round((prefs.classifier?.threshold ?? 0.60) * 100)}% is sent to Groq. Confidence is not a guarantee of accuracy.</p>
-        <p>Groq fallback: {prefs.classifier?.fallback_configured ? `configured (${prefs.classifier?.fallback_model || "server model"})` : "key missing - low-confidence items remain pending"}. Models and threshold are configured through the server environment.</p>
+        <p>YouTube uses video titles only. Hugging Face runs first; results below {Math.round((prefs.classifier?.threshold ?? 0.80) * 100)}% and titles with ambiguous sentiment targets are verified by Gemini.</p>
+        <p>Gemini verifier: {prefs.classifier?.fallback_configured ? `configured (${prefs.classifier?.fallback_model || "server model"})` : "key missing - low-confidence items remain pending"}. Gemini resolves whether negative language is actually directed at Jan Suraaj or Prashant Kishore, including sarcasm.</p>
         {prefs.classifier?.error && <p className="error">{prefs.classifier.error}</p>}
       </section>
       {credential && (
@@ -1618,36 +1749,6 @@ function SettingsPanel({
                 }
               />
             </label>
-            {credential.mode === "apify" && (
-              <details>
-                <summary>Advanced Actor override (optional)</summary>
-                <p>Leave these blank to use JanNetra's tested default Actor and input for this source.</p>
-                <label>
-                  Apify Actor ID
-                  <input className="form-control"
-                    placeholder="Default selected automatically"
-                    value={credential.actor_id}
-                    onChange={(e) => setCredential({ ...credential, actor_id: e.target.value })}
-                  />
-                </label>
-                <label>
-                  Actor input JSON template
-                  <textarea className="form-control" rows={6}
-                    placeholder="Default input selected automatically"
-                    value={credential.input_template}
-                    onChange={(e) => setCredential({ ...credential, input_template: e.target.value })}
-                  />
-                  <small>Placeholders: {'{{keywords_json}}'}, {'{{query}}'}, {'{{since_iso}}'}, {'{{max_items}}'}</small>
-                </label>
-                <label>
-                  Maximum items per run
-                  <input className="form-control" type="number" min={1} max={1000}
-                    value={credential.max_items}
-                    onChange={(e) => setCredential({ ...credential, max_items: Number(e.target.value) })}
-                  />
-                </label>
-              </details>
-            )}
             {error && <p className="error">{error}</p>}
             <button className="btn btn-primary primary">Save encrypted credential</button>
           </form>

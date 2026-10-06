@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from cryptography.fernet import Fernet
 from pymongo.errors import DuplicateKeyError
-from .config import config
+from .config import config, DEFAULT_AUTOMATION_START_HOUR, DEFAULT_AUTOMATION_END_HOUR
 from .models import now
 from .connectors import apify_posts, google_news_posts, youtube_posts, request
 from .sentiment import classifier
@@ -26,10 +26,12 @@ def bounds(day):
     return start.astimezone(timezone.utc), (start + timedelta(days=1)).astimezone(timezone.utc)
 
 
-def within_automation_window(value=None):
-    """Return true during the configured inclusive operating hours."""
+def within_automation_window(value=None, start_hour=None, end_hour=None):
+    """Return true during the inclusive operating hours."""
     local = (value or now()).astimezone(ZoneInfo(config().reporting_timezone))
-    return config().automation_start_hour <= local.hour <= config().automation_end_hour
+    start = DEFAULT_AUTOMATION_START_HOUR if start_hour is None else start_hour
+    end = DEFAULT_AUTOMATION_END_HOUR if end_hour is None else end_hour
+    return start <= local.hour <= end
 
 def encrypt(value):
     return Fernet(config().encryption_key.encode()).encrypt(json.dumps(value).encode()).decode()
@@ -38,7 +40,11 @@ def decrypt(value):
     return json.loads(Fernet(config().encryption_key.encode()).decrypt(value.encode()))
 
 async def settings(db):
-    return await db.settings.find_one({'_id': 'main'}) or {'threshold': 500}
+    return await db.settings.find_one({'_id': 'main'}) or {
+        'threshold': 500,
+        'automation_start_hour': DEFAULT_AUTOMATION_START_HOUR,
+        'automation_end_hour': DEFAULT_AUTOMATION_END_HOUR,
+    }
 
 async def audit(db, user, action, meta=None):
     await db.audit_logs.insert_one(dict(user_id=str(user['_id']), action=action, timestamp=now(), meta=meta or {}))
@@ -110,8 +116,11 @@ async def create_alert(db, day):
 async def notify_negative_posts(db, client):
     """Send one idempotent Telegram message for every newly classified negative post."""
     c = config()
+    prefs = await settings(db)
     if (c.seed_mock_data or not c.telegram_bot_token or not c.telegram_chat_id
-            or not within_automation_window()):
+            or not within_automation_window(
+                start_hour=prefs.get('automation_start_hour', DEFAULT_AUTOMATION_START_HOUR),
+                end_hour=prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR))):
         return
     start, end = bounds(today())
     await db.posts.update_many({
@@ -167,7 +176,10 @@ _sync_lock = asyncio.Lock()
 
 async def scheduled_sync(db, client, platforms):
     """Run without any logged-in user, but only inside the operating window."""
-    if not within_automation_window():
+    prefs = await settings(db)
+    if not within_automation_window(
+            start_hour=prefs.get('automation_start_hour', DEFAULT_AUTOMATION_START_HOUR),
+            end_hour=prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR)):
         return
     await sync(db, client, platforms=platforms)
 
@@ -225,8 +237,8 @@ async def sync(db, client, platforms=None):
                     for p, r in zip(batch, results, strict=True):
                         if r.pending:
                             await db.posts.update_one({'_id': p['_id'], 'sentiment': None}, {'$set': {
-                                'classification_status': 'awaiting_groq', 'hf_candidate': r.model_dump(),
-                                'classification_error': 'Groq unavailable; low-confidence result excluded from totals'}})
+                                'classification_status': 'awaiting_gemini', 'hf_candidate': r.model_dump(),
+                                'classification_error': 'Gemini unavailable; low-confidence result excluded from totals'}})
                             continue
                         start, end = bounds(today())
                         published_today = start <= p['published_at'] < end
@@ -236,13 +248,9 @@ async def sync(db, client, platforms=None):
                         update_fields = {'sentiment': dict(
                             label=r.sentiment, confidence=r.confidence, reason=r.reason,
                             model_used=r.model_used or engine.provenance, hf_confidence=r.hf_confidence,
-                            sarcasm_detected=r.sarcasm_detected,
-                            sarcasm_confidence=r.sarcasm_confidence,
-                            sarcasm_model_confidence=r.sarcasm_model_confidence,
-                            sarcasm_model_used=r.sarcasm_model_used,
                             language=r.language, targets=r.targets,
                             review_required=r.review_required, classified_at=now()), 'classification_status': 'classified',
-                            'sentiment_schema_version': 4}
+                            'sentiment_schema_version': 5}
                         if notification:
                             update_fields['telegram_notification'] = notification
                         unset_fields = {'classification_error': '', 'hf_candidate': ''}

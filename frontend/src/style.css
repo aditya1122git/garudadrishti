@@ -1023,6 +1023,25 @@ footer > span:first-child {
 .settings-save .error {
   margin: 0;
 }
+.schedule-editor {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 150px 150px;
+  align-items: end;
+  gap: 16px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.schedule-editor label {
+  margin: 0;
+}
+.schedule-editor p,
+.schedule-editor small {
+  margin: 4px 0 0;
+}
+.schedule-editor small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
 .connections {
   margin-bottom: 22px;
 }
@@ -1981,6 +2000,9 @@ body {
   color: var(--muted);
   font-size: 12px;
 }
+.profile-edit-button {
+  margin-left: auto;
+}
 .profile-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1988,6 +2010,20 @@ body {
 }
 .profile-fields label {
   margin-bottom: 4px;
+}
+.change-password-button {
+  align-self: flex-start;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fb-blue);
+  font-size: 11px;
+  font-weight: 600;
+}
+.change-password-button:hover,
+.change-password-button:focus-visible {
+  text-decoration: underline;
 }
 .profile-password-heading {
   margin: 24px 0 16px;
@@ -2008,6 +2044,52 @@ body {
 .profile-passwords {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
+.profile-confirmation-box {
+  margin-top: 24px;
+  padding: 22px;
+  border: 1px solid #ccd9ea;
+  border-radius: 8px;
+  background: #f7faff;
+}
+.profile-confirmation-box > div:first-child {
+  margin-bottom: 16px;
+}
+.profile-confirmation-box p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.profile-confirmation-box > label {
+  max-width: 360px;
+}
+.password-change-box > label {
+  max-width: none;
+}
+.profile-password-field {
+  position: relative;
+  display: block;
+}
+.profile-password-field input {
+  padding-right: 44px;
+}
+.profile-password-field button {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  color: #65676b;
+}
+.profile-password-field button:hover,
+.profile-password-field button:focus-visible {
+  background: #e4e6eb;
+  color: var(--fb-blue);
+}
 .profile-passwords label small {
   display: block;
   color: var(--muted);
@@ -2020,6 +2102,7 @@ body {
 .profile-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 10px;
   margin-top: 22px;
 }
 .app-navbar .mobile-toggle {
@@ -2394,6 +2477,18 @@ body {
 }
 .post-author > b {
   font-size: 13px;
+}
+@media (max-width: 700px) {
+  .schedule-editor {
+    grid-template-columns: 1fr 1fr;
+  }
+  .schedule-editor > div,
+  .schedule-editor small {
+    grid-column: 1 / -1;
+  }
+  .profile-edit-button {
+    margin-left: auto;
+  }
 }
 .post-author > span:last-child {
   font-size: 11px;

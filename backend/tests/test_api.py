@@ -29,7 +29,7 @@ def test_overview_math_and_demo_isolation(client, auth):
     data = client.get('/api/overview', headers=auth).json()
     totals = data['today']
     assert data['demo'] is True
-    assert data['classifier']['provider'] == 'Hugging Face sentiment + sarcasm + Groq fallback'
+    assert data['classifier']['provider'] == 'Hugging Face sentiment + Gemini target verifier'
     assert data['classifier']['status'] == 'demo'
     assert data['classifier']['model'] == 'cardiffnlp/twitter-xlm-roberta-base-sentiment'
     assert totals['total_count'] == 1650
@@ -75,6 +75,26 @@ def test_no_secret_import_or_demo_credential_storage(client, auth):
     assert client.post('/api/import', headers=auth).status_code == 404
 
 
+def test_admin_can_update_automation_window(client, auth):
+    before = client.get('/api/settings', headers=auth).json()
+    keywords = [row['keyword'] for row in before['keywords'] if row['is_active']]
+    response = client.put('/api/settings', headers=auth, json={
+        'keywords': keywords,
+        'automation_start_hour': 7,
+        'automation_end_hour': 21,
+    })
+    assert response.status_code == 200
+    after = client.get('/api/settings', headers=auth).json()
+    assert after['automation_start_hour'] == 7
+    assert after['automation_end_hour'] == 21
+    invalid = client.put('/api/settings', headers=auth, json={
+        'keywords': keywords,
+        'automation_start_hour': 21,
+        'automation_end_hour': 7,
+    })
+    assert invalid.status_code == 422
+
+
 def test_user_can_update_profile_email_name_and_password(client, auth):
     original = {'email': 'profile-user@example.org', 'password': 'Profile-Old-Password!', 'role': 'viewer'}
     assert client.post('/api/users', headers=auth, json=original).status_code == 201
@@ -82,7 +102,7 @@ def test_user_can_update_profile_email_name_and_password(client, auth):
     token = {'Authorization': 'Bearer ' + login.json()['access_token']}
     updated = {
         'name': 'Campaign Analyst', 'email': 'analyst-profile@example.org',
-        'current_password': original['password'], 'new_password': 'Profile-New-Password!',
+        'current_password': original['password'], 'new_password': 'NewPass9!',
     }
     response = client.put('/api/profile', headers=token, json=updated)
     assert response.status_code == 200
@@ -90,3 +110,13 @@ def test_user_can_update_profile_email_name_and_password(client, auth):
     assert client.get('/api/profile', headers=token).json()['email'] == updated['email']
     assert client.post('/api/auth/token', data={'username': original['email'], 'password': original['password']}).status_code == 401
     assert client.post('/api/auth/token', data={'username': updated['email'], 'password': updated['new_password']}).status_code == 200
+
+
+def test_profile_password_requires_8_to_14_characters(client, auth):
+    profile = client.get('/api/profile', headers=auth).json()
+    for invalid in ('Short7', 'Password-Way-Too-Long'):
+        response = client.put('/api/profile', headers=auth, json={
+            'name': profile['name'], 'email': profile['email'],
+            'current_password': 'JanNetra-Demo-2026!', 'new_password': invalid,
+        })
+        assert response.status_code == 422

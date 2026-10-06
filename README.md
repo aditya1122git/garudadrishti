@@ -66,34 +66,27 @@ A local `.env` is provided beside `docker-compose.yml`. It is ignored by Git and
 | `HF_BATCH_SIZE`, `HF_MAX_LENGTH` | Default 16 posts, 256 tokens per post; long posts are flagged as truncated |
 | `HF_CPU_THREADS` | Default 2 CPU threads; inference runs in a background thread |
 | `HF_LOCAL_FILES_ONLY` | Offline cache-only loading after downloading weights; default false |
-| `GROQ_API_KEY`, `GROQ_MODEL` | Low-confidence fallback key and model; default `qwen/qwen3.8-27b` |
-| `HF_CONFIDENCE_THRESHOLD`, `GROQ_CONCURRENCY` | Groq gate defaults to 0.60; 2 concurrent calls |
-| `SARCASM_MODEL`, `SARCASM_REVISION` | Local Hindi/Hinglish detector; pinned `ashish5193/sarcasm_model` |
-| `SARCASM_TOKENIZER_MODEL`, `SARCASM_TOKENIZER_REVISION` | Pinned Cardiff tokenizer required because the sarcasm repository does not bundle tokenizer files |
-| `SARCASM_CONFIDENCE_THRESHOLD` | Sarcasm detection boundary; default 0.65 |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | Target-aware verifier key and model; default `gemini-3.5-flash-lite` |
+| `HF_CONFIDENCE_THRESHOLD`, `GEMINI_CONCURRENCY` | Gemini gate defaults to 0.80; 2 concurrent calls |
 | `ENABLED_PLATFORMS` | Comma-separated sources: `facebook,instagram,x,youtube,news`; set `youtube` for YouTube-only operation |
 | `YOUTUBE_API_KEY` | YouTube Data API v3 key |
 | `YOUTUBE_INITIAL_LOOKBACK_DAYS`, `YOUTUBE_TERMS_PER_QUERY` | First-run backfill window (7 days) and quota-aware keyword grouping (4 terms) |
 | `APIFY_API_TOKEN` | Shared by the Facebook, Instagram and X connectors; News does not use Apify |
-| `APIFY_FACEBOOK_ACTOR_ID`, `APIFY_INSTAGRAM_ACTOR_ID`, `APIFY_X_ACTOR_ID` | Optional advanced overrides; JanNetra supplies default Actor IDs |
-| `APIFY_*_INPUT_JSON` | Optional Actor-specific input override with `{{keywords_json}}`, `{{query}}`, `{{since_iso}}`, `{{max_items}}` placeholders |
-| `APIFY_MAX_ITEMS`, `APIFY_RUN_TIMEOUT_SECONDS` | Per-run item guard (50) and synchronous-run timeout (240 seconds) |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Enable one Telegram message, including the source link, for each newly classified negative post |
 | `ALLOWED_ORIGINS` | Exact CORS origins for the UI |
 | `REPORTING_TIMEZONE` | `Asia/Kolkata` by default |
 | `SCHEDULER_ENABLED` | Enables server-side automation; no admin session or open browser is required |
-| `AUTOMATION_START_HOUR`, `AUTOMATION_END_HOUR` | Automatic ingestion, classification and Telegram delivery window in `REPORTING_TIMEZONE` (06:00-22:00 by default) |
-| `YOUTUBE_SYNC_INTERVAL_MINUTES`, `APIFY_SYNC_INTERVAL_HOURS` | Fixed YouTube 15-minute and Apify 4-hour schedules |
+| `YOUTUBE_SYNC_INTERVAL_MINUTES` | Fixed YouTube/Google News 15-minute schedule; social Apify sources run every 4 hours |
 
 ### Hugging Face multilingual classifier
 
 The primary classifier is `cardiffnlp/twitter-xlm-roberta-base-sentiment`, run locally with Transformers/PyTorch. Its [official model card](https://huggingface.co/cardiffnlp/twitter-xlm-roberta-base-sentiment) lists Hindi and English among eight sentiment fine-tuning languages. **Hinglish, sarcasm and Bihar political discourse have not been validated here.** It predicts overall text tone, not entity-targeted stance. A negative news report can concern an issue rather than the tracked party. Validate on human-labeled examples before relying on political alerts; model probability is not calibrated accuracy.
 
-Hugging Face runs locally. YouTube classification uses the video title only. Each title passes through language detection, tracked-entity detection, Cardiff multilingual sentiment, and `ashish5193/sarcasm_model`. The target-wise combiner uses opponent/campaign context and high-precision Hindi/Hinglish cues alongside the sarcasm model because its training data is imbalanced and it can miss implicit political sarcasm. Only combined confidence below `HF_CONFIDENCE_THRESHOLD` (default 0.60) is sent to Groq (`GROQ_MODEL=qwen/qwen3.8-27b`). Mixed requires meaningful positive and negative stance toward the tracked target. `GROQ_API_KEY` is required for low-confidence verification. Missing keys/provider failures leave these items pending and excluded from final sentiment totals. Strict JSON output, result IDs/count validation, per-item retry on malformed batches, backoff and bounded concurrency are implemented. First real classification downloads about 1.6 GB of model weights plus tokenizer files. Models are cached once per API process, and serialized inference runs off the async event loop. Start deployment planning around 4 GB RAM for the API and benchmark on the actual host; this is a sizing estimate, not a measured guarantee. CPU works; GPU is optional.
+Hugging Face runs locally. YouTube classification uses the video title only. Each title passes through language detection, tracked-entity detection and Cardiff multilingual sentiment. Results below `HF_CONFIDENCE_THRESHOLD` (default 0.80) go to Gemini, as do apparently confident results whose negative language may target an opponent, quoted speaker or unrelated event. Gemini measures stance specifically toward Jan Suraaj and Prashant Kishore and handles Hindi, English, Hinglish and sarcasm. Mixed requires meaningful positive and negative stance toward a tracked target. `GEMINI_API_KEY` is required for verification. Missing keys/provider failures leave these items pending and excluded from final totals. Strict JSON schema output, result ID/count validation, per-item retry on malformed batches, exponential backoff and bounded concurrency are implemented. First local inference downloads about 1.1 GB of model weights. The model is cached once per API process, and serialized inference runs off the async event loop. Start deployment planning around 3 GB RAM for the API and benchmark on the actual host; CPU works and GPU is optional.
 
-Only unclassified live posts are normally processed. A versioned schema migration requeues active records when target-stance rules change. Failed inference leaves posts pending and exposes `unavailable`; the next sync retries. Before first inference the status is `pending`. Model output count, named labels and probabilities are validated. Groq results below the threshold and truncated HF inputs are flagged for review. Confidence is not calibrated accuracy; the stored record includes raw HF confidence, raw sarcasm-model probability, combined sarcasm confidence, language, targets and model provenance.
+Only unclassified live posts are processed. Model upgrades do not silently requeue historical records; any deliberate reclassification must be run as a separate maintenance operation. Failed inference leaves posts pending and exposes `unavailable`; the next sync retries. Before first inference the status is `pending`. Model output count, named labels and probabilities are validated. Gemini results below the threshold and truncated HF inputs are flagged for review. Confidence is not calibrated accuracy; stored records include raw HF confidence, language, targets and final model provenance.
 
-To change models, set `HF_MODEL` and its matching `HF_REVISION` commit, then restart. Only sequence classifiers with exactly negative/neutral/positive named labels are accepted; unknown `LABEL_0` mappings fail closed. Remote repository code is disabled. The pinned official checkpoint uses restricted `weights_only=True` loading. Enable `HF_LOCAL_FILES_ONLY=true` after caching for offline HF operation; Groq fallback still requires network access. Keep one API worker with the built-in scheduler.
+To change models, set `HF_MODEL` with its matching `HF_REVISION`, or set `GEMINI_MODEL`, then restart. Only sequence classifiers with exactly negative/neutral/positive named labels are accepted; unknown `LABEL_0` mappings fail closed. Remote repository code is disabled. The pinned official checkpoint uses restricted `weights_only=True` loading. Enable `HF_LOCAL_FILES_ONLY=true` after caching for offline HF operation; Gemini verification still requires network access. Keep one API worker with the built-in scheduler.
 
 To download the model and run an explicit smoke check, from `backend` run:
 
@@ -108,28 +101,20 @@ This uses built-in sample text only. It does not write posts, connect to social 
 | Platform | Implemented connector | Required access / coverage |
 |---|---|---|
 | X | Configured Apify Actor, normalized output, overlap deduplication and retry/backoff | Apify token, Actor access and the Actor's input schema. |
-| YouTube | Official Data API v3 video search + `videos.list` snippet/statistics | API key and quota. Every 15 minutes from 06:00 through 22:00 IST, active terms are split into OR groups; each group gets a general search and a `videoDuration=short` search, with result deduplication. The initial strategy upgrade backfills 7 days. Only the video title is matched, stored, and classified. Descriptions and comments are excluded. Likes and views are read as video metadata. Legacy YouTube records outside the title-only scope remain stored but are excluded from feeds and totals. |
-| Facebook | Configured Apify Actor | Actor backed by owned/managed Graph access or a licensed compliant listening provider; arbitrary public scraping is outside the supported configuration. |
-| Instagram | Configured Apify Actor | Actor backed by owned/managed professional-account access or a licensed compliant listening provider; arbitrary public scraping is outside the supported configuration. |
-| News | Google News RSS search feeds | Credential-free RSS ingestion runs every four hours from 06:00 through 22:00 IST and retains only News18, Zee Bihar, ABP Bihar, News State, Sahara Samay, Bihar Tak, First Bihar, Live Cities, News4Nation and Hindustani Media. The headline is classified and the Google News article link is retained. |
+| YouTube | Official Data API v3 video search + `videos.list` snippet/statistics | API key and quota. Every 15 minutes inside the admin-configured active window, terms are split into OR groups; each group gets general and `videoDuration=short` searches with deduplication. The initial strategy upgrade backfills 7 days. Only the video title is matched, stored, and classified. Descriptions and comments are excluded. |
+| Facebook | Configured Apify Actor | Actor access and a compatible output schema. |
+| Instagram | Configured Apify Actor | Actor access and a compatible output schema. |
+| News | Google News RSS search feeds | Credential-free RSS ingestion runs every 15 minutes inside the admin-configured active window and retains only News18, Zee Bihar, ABP Bihar, News State, Sahara Samay, Bihar Tak, First Bihar, Live Cities, News4Nation and Hindustani Media. The headline is classified and the Google News article link is retained. |
 
-There is no manual upload/CSV/JSON import endpoint or UI; CSV is export only. Missing Actor credentials show **Not connected**, never fabricated zeros. An unavailable source remains identifiable and its last observed figures are marked partial/stale. The operator must choose Actors and data access that comply with platform terms and applicable law. For Facebook and Instagram, JanNetra supports only owned/managed access or a licensed compliant listening source routed through Apify. Zero engagement metrics may represent unavailable fields; “interactions” is likes + comments + shares, not views.
+There is no manual upload/CSV/JSON import endpoint or UI; CSV is export only. Missing Actor credentials show **Not connected**, never fabricated zeros. An unavailable source remains identifiable and its last observed figures are marked partial/stale. Zero engagement metrics may represent unavailable fields; ?interactions? is likes + comments + shares, not views.
 
 YouTube Search API is relevance-ranked and does not promise an exhaustive list of every matching upload. JanNetra searches public videos across channels; it cannot use a person's YouTube watch history. Calls are bounded to control quota, and the dedicated short-duration query improves Shorts coverage without claiming that every under-four-minute video is a YouTube Short. The default search cadence is conservative; check the project's actual daily quota before increasing it. Short keywords such as PK are noisy; deactivate them in Settings if appropriate.
 
 ### Apify Actor contract
 
-`APIFY_API_TOKEN` configures `apify/facebook-search-scraper`, `data-slayer/instagram-keyword-posts-scraper`, and `apidojo/tweet-scraper`, with source-specific keyword inputs and comments disabled. News is fetched separately from Google News RSS and requires no API token. Social connectors run Apify's synchronous dataset endpoint with bearer authentication, a response item guard, bounded timeout and retry/backoff.
+`APIFY_API_TOKEN` is the only Apify environment value. JanNetra fixes the social Actors to `apify/facebook-posts-scraper`, `apify/instagram-scraper`, and `apidojo/tweet-scraper`. Because Facebook's Posts Actor requires page URLs, JanNetra first discovers relevant public pages through `apify/facebook-search-scraper`, then fetches their latest posts. News is fetched separately from Google News RSS and requires no API token. Social connectors use bearer authentication, bounded synchronous runs, keyword filtering and retry/backoff.
 
-Actor IDs and JSON templates remain optional advanced overrides because Store Actors and their schemas can change independently of JanNetra. When overriding an Actor, copy its working JSON input from Apify Console and replace values with the supported placeholders.
-
-```json
-{"searchQueries": {{keywords_json}}, "startDate": "{{since_iso}}", "maxItems": {{max_items}}}
-```
-
-Available placeholders are `{{keywords_json}}`, `{{query}}`, `{{since_iso}}`, and `{{max_items}}`. Property names must match the chosen Actor's input schema. Output normalization accepts common IDs, post text/caption/title, publication timestamps, URLs, authors and engagement counts. Items without a usable timestamp or tracked term are excluded. Social replies/comments are not requested by JanNetra. A custom Actor can return the canonical fields for deterministic mapping.
-
-Apify usage can incur Actor and compute charges; `APIFY_MAX_ITEMS` is the local per-run guard. No source is marked live until its Actor run completes successfully.
+Actor IDs and JSON templates remain optional advanced overrides because Store Actors and their schemas can change independently of JanNetra. Output normalization accepts common IDs, post text/caption/title, publication timestamps, URLs, authors and engagement counts. Items without a usable timestamp or tracked term are excluded.
 
 ## Data flow, reporting and alerts
 
@@ -149,7 +134,7 @@ Alert creation is idempotent on a unique `date` index and fires strictly above t
 
 Per-post Telegram alerts are enabled when both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. Each newly classified negative post is queued once and sent with its platform, author, confidence, excerpt and original link. Successful posts are marked sent; failed deliveries retry on a later sync. Existing historical negatives are not backfilled automatically, preventing a notification flood when Telegram is first enabled.
 
-The scheduler runs inside the API process without a logged-in admin. YouTube ingestion runs every 15 minutes; Facebook, Instagram, X and News run together every four hours at 06:00, 10:00, 14:00, 18:00 and 22:00 IST. Classification follows each ingestion run, and each newly classified negative post is handed to Telegram after its batch. Telegram delivery is restricted to posts whose publication date is today in Asia/Kolkata and to the 06:00-22:00 operating window; older queued posts are marked skipped.
+The scheduler runs inside the API process without a logged-in admin. YouTube and Google News RSS run every 15 minutes; Facebook, Instagram and X run every four hours. The initial active window is 06:00-22:00 IST and an admin can change it in Settings. Saving immediately replaces the scheduler jobs and also changes the Telegram-delivery window. Classification follows ingestion, and each newly classified negative post is handed to Telegram after its batch. Only posts published today in Asia/Kolkata are alerted; older queued posts are marked skipped.
 
 ## Security and deployment
 

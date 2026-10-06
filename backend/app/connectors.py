@@ -12,7 +12,14 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 from xml.etree import ElementTree
 import httpx
-from .config import config
+from .config import (
+    APIFY_FACEBOOK_DISCOVERY_ACTOR,
+    APIFY_FACEBOOK_DISCOVERY_LIMIT,
+    APIFY_MAX_ITEMS,
+    APIFY_RUN_TIMEOUT_SECONDS,
+    DEFAULT_APIFY_ACTORS,
+    config,
+)
 
 NEWS_CHANNELS = (
     'News18', 'Zee Bihar', 'ABP Bihar', 'News State', 'Sahara Samay',
@@ -52,7 +59,25 @@ async def request(client, method, url, **kwargs):
             response = await client.request(method, url, **kwargs)
             if comments_optional and response.status_code == 403 and any(e.get('reason') == 'commentsDisabled' for e in response.json().get('error', {}).get('errors', [])):
                 return {'items': []}
-            if response.status_code == 429 or response.status_code >= 500:
+            if response.status_code == 429:
+                # YouTube's exhausted daily search quota cannot recover during
+                # this request. Surface the real cause immediately instead of
+                # spending four backoff attempts and showing a vague outage.
+                try:
+                    error = response.json().get('error', {})
+                    message = error.get('message', '')
+                except (TypeError, ValueError):
+                    message = ''
+                if 'per day' in message.lower() and 'quota' in message.lower():
+                    raise ProviderError('YouTube daily search quota exhausted; retry after quota reset')
+                delay = max(float(response.headers.get('retry-after', 0) or 0),
+                            float(response.headers.get('x-rate-limit-reset', 0) or 0) - time.time(),
+                            2 ** attempt + random.random())
+                if delay > 30 or attempt == 3:
+                    raise ProviderError('Provider rate limited or unavailable; retry next scheduled run')
+                await asyncio.sleep(delay)
+                continue
+            if response.status_code >= 500:
                 delay = max(float(response.headers.get('retry-after', 0) or 0),
                             float(response.headers.get('x-rate-limit-reset', 0) or 0) - time.time(),
                             2 ** attempt + random.random())
@@ -243,33 +268,28 @@ def _timestamp(value):
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
 
-def _actor_input(platform, template, keywords, since, max_items):
-    if not template:
-        per_query = max(1, min(50, max_items // max(len(keywords), 1)))
-        defaults = {
-            'facebook': {'categories': keywords, 'searchType': 'posts', 'resultsLimit': max_items},
-            'instagram': {'searchQueries': keywords[:10], 'maxResultsPerQuery': per_query},
-            'x': {'searchTerms': keywords, 'maxItems': max_items, 'sort': 'Latest'},
+def _actor_input(platform, keywords, since, max_items):
+    """Build inputs for the fixed, tested Apify Actors."""
+    since_iso = since.isoformat().replace('+00:00', 'Z')
+    if platform == 'instagram':
+        # Instagram's official Actor accepts comma-separated searches. Hashtag
+        # search is the compliant public discovery mode for keyword monitoring.
+        searches = []
+        for keyword in keywords[:10]:
+            tag = re.sub(r'[^\w]+', '', keyword.lstrip('#'), flags=re.UNICODE)
+            if tag and tag.casefold() not in {value.casefold() for value in searches}:
+                searches.append(tag)
+        return {
+            'resultsType': 'posts',
+            'searchType': 'hashtag',
+            'search': ','.join(searches),
+            'searchLimit': min(max_items, 50),
+            'resultsLimit': max_items,
+            'onlyPostsNewerThan': since_iso,
         }
-        return defaults[platform]
-    values = {
-        '{{keywords_json}}': json.dumps(keywords, ensure_ascii=False),
-        '{{query}}': ' OR '.join(f'"{term}"' for term in keywords),
-        '{{since_iso}}': since.isoformat().replace('+00:00', 'Z'),
-        '{{max_items}}': str(max_items),
-    }
-    raw = template
-    for marker, value in values.items():
-        # JSON string values must be encoded when substituted inside quotes.
-        replacement = value if marker in ('{{keywords_json}}', '{{max_items}}') else json.dumps(value, ensure_ascii=False)[1:-1]
-        raw = raw.replace(marker, replacement)
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ProviderError(f'Invalid Apify input template: {exc.msg}') from None
-    if not isinstance(result, dict):
-        raise ProviderError('Apify input template must be a JSON object')
-    return result
+    if platform == 'x':
+        return {'searchTerms': keywords, 'maxItems': max_items, 'sort': 'Latest'}
+    raise ProviderError(f'Unsupported direct Apify input for {platform}')
 
 
 def _apify_item(platform, item, keywords, since):
@@ -284,7 +304,7 @@ def _apify_item(platform, item, keywords, since):
     if not content or not matches(content, keywords):
         return None
     published = _timestamp(_first(item, 'publishedAt', 'published_at', 'createdAt', 'created_at', 'takenAt',
-                                  'date_utc', 'timestamp', 'date', 'time', 'article.publishedAt'))
+                                  'date_utc', 'timestamp', 'date', 'time', 'timeCreated', 'article.publishedAt'))
     if published < since:
         return None
     url = str(_first(item, 'url', 'postUrl', 'tweetUrl', 'permalink', 'link', 'article.url', default=''))
@@ -292,41 +312,65 @@ def _apify_item(platform, item, keywords, since):
     if not external_id:
         external_id = hashlib.sha256(f'{platform}\0{url}\0{content}\0{published.isoformat()}'.encode()).hexdigest()
     author = _author_name(_first(item, 'authorName', 'pageName', 'author.name', 'author.userName', 'author.username',
-                                'author', 'ownerUsername', 'username', 'fullName', 'user.name', 'user',
+                                'author', 'ownerUsername', 'username', 'fullName', 'user.pageName', 'user.name', 'user',
                                 'channelName', 'source', 'publisher', default='Unknown'))
     engagement = dict(
-        likes=_number(item, 'likesCount', 'likeCount', 'likes', 'favoriteCount', 'stats.likes', 'reactions_count', 'public_metrics.like_count'),
+        likes=_number(item, 'likesCount', 'likeCount', 'reactionCount', 'likes', 'favoriteCount', 'stats.likes', 'reactions_count', 'public_metrics.like_count'),
         comments=_number(item, 'commentsCount', 'commentCount', 'comments', 'replyCount', 'stats.comments', 'comments_count', 'public_metrics.reply_count'),
         shares=_number(item, 'sharesCount', 'shareCount', 'shares', 'retweetCount', 'stats.shares', 'reshare_count', 'public_metrics.retweet_count'),
-        views=_number(item, 'viewsCount', 'viewCount', 'views', 'impressionCount', 'public_metrics.impression_count'),
+        views=_number(item, 'viewsCount', 'viewCount', 'videoPostViewCount', 'views', 'impressionCount', 'public_metrics.impression_count'),
     )
     row = post(platform, external_id, author, content, url, published.isoformat(), engagement)
     row.update(source_provider='apify', content_scope='apify-public-post-v1')
     return row
 
 
-async def apify_posts(client, platform, secret, keywords, since):
-    """Run a configured Apify Actor and normalize its default dataset items.
-
-    Actor output formats vary, so this adapter accepts the common field names
-    used by social/news Actors. A custom Actor can use the canonical names
-    documented in the README for deterministic mapping.
-    """
-    actor_id = str(secret.get('actor_id', '')).strip()
-    if not re.fullmatch(r'[A-Za-z0-9_-]+(?:[~/][A-Za-z0-9_.-]+)?', actor_id):
-        raise ProviderError('Invalid or missing Apify Actor ID')
-    max_items = min(max(int(secret.get('max_items', config().apify_max_items)), 1), 1000)
-    payload = _actor_input(platform, secret.get('input_template', ''), keywords, since, max_items)
+async def _run_apify_actor(client, actor_id, api_key, payload, limit):
     actor_path = quote(actor_id.replace('/', '~'), safe='~')
-    url = f'https://api.apify.com/v2/actors/{actor_path}/run-sync-get-dataset-items'
+    url = f'https://api.apify.com/v2/acts/{actor_path}/run-sync-get-dataset-items'
     data = await request(client, 'POST', url,
-                         params={'format': 'json', 'clean': '1', 'limit': max_items, 'maxItems': max_items,
-                                 'timeout': config().apify_run_timeout_seconds},
-                         headers={'Authorization': f'Bearer {secret["api_key"]}', 'Content-Type': 'application/json'},
-                         timeout=config().apify_run_timeout_seconds + 15,
+                         params={'format': 'json', 'clean': '1', 'limit': limit, 'maxItems': limit,
+                                 'timeout': APIFY_RUN_TIMEOUT_SECONDS},
+                         headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+                         timeout=APIFY_RUN_TIMEOUT_SECONDS + 15,
                          json=payload)
     if not isinstance(data, list):
         raise ProviderError('Apify Actor did not return a dataset item array')
+    return data
+
+
+async def apify_posts(client, platform, secret, keywords, since):
+    """Run JanNetra's fixed Apify Actors and normalize public social posts."""
+    api_key = str(secret.get('api_key', '')).strip()
+    if not api_key:
+        raise ProviderError('Missing Apify API token')
+    max_items = APIFY_MAX_ITEMS
+    if platform == 'facebook':
+        # The official Posts Actor accepts page/profile URLs, not keywords.
+        # Discover matching public pages first, then fetch their latest posts.
+        discovery = await _run_apify_actor(client, APIFY_FACEBOOK_DISCOVERY_ACTOR, api_key, {
+            'categories': keywords[:10],
+            'locations': ['Bihar'],
+            'resultsLimit': APIFY_FACEBOOK_DISCOVERY_LIMIT,
+        }, APIFY_FACEBOOK_DISCOVERY_LIMIT)
+        page_urls = []
+        for item in discovery:
+            candidate = str(_first(item, 'facebookUrl', 'pageUrl', 'url', default='')).strip()
+            if candidate.startswith(('https://www.facebook.com/', 'https://facebook.com/')) and candidate not in page_urls:
+                page_urls.append(candidate)
+        if not page_urls:
+            return []
+        per_page = max(1, max_items // len(page_urls))
+        payload = {
+            'startUrls': [{'url': url} for url in page_urls],
+            'resultsLimit': per_page,
+            'onlyPostsNewerThan': since.isoformat().replace('+00:00', 'Z'),
+        }
+    else:
+        payload = _actor_input(platform, keywords, since, max_items)
+    data = await _run_apify_actor(
+        client, DEFAULT_APIFY_ACTORS[platform], api_key, payload, max_items,
+    )
     rows = []
     invalid = 0
     for item in data:

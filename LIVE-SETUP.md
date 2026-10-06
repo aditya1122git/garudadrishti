@@ -11,7 +11,7 @@ The local `.env` is created in this project directory. Live mode is the default.
 
 ## Optional sources and notifications
 
-- **Apify sources:** `APIFY_API_TOKEN` connects Facebook, Instagram and X automatically. Actor IDs and input templates in `.env` or Settings are optional advanced overrides. Apify Store Actors can incur per-result and compute charges; keep the item limit conservative.
+- **Apify sources:** `APIFY_API_TOKEN` is the only setting required for Facebook, Instagram and X. JanNetra uses fixed Actor IDs and validated source-specific inputs.
 - **News:** Google News RSS needs no key and monitors the approved Bihar publisher list documented in the README.
 - **Telegram alerts:** set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` for immediate current-day negative-post alerts.
 - **Keywords:** confirm tracked terms in Settings. The dashboard daily threshold remains an internal 500-negative-post rule.
@@ -32,7 +32,7 @@ Hostinger clones the repository, so the ignored local `.env` file is not present
 - `JWT_SECRET` - an independent random value of at least 32 characters
 - `ENCRYPTION_KEY` - a Fernet key; keep this stable for the lifetime of the database
 - `BOOTSTRAP_EMAIL` and `BOOTSTRAP_PASSWORD` - required on the first deployment because the new Mongo volume has no users; password must be 14-72 UTF-8 bytes
-- `YOUTUBE_API_KEY`, `APIFY_API_TOKEN`, `GROQ_API_KEY`
+- `YOUTUBE_API_KEY`, `APIFY_API_TOKEN`, `GEMINI_API_KEY`
 - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` when Telegram alerts are enabled
 - `PUBLIC_PORT=8080` to use `http://SERVER_IP:8080`, or `PUBLIC_PORT=80` when port 80 is free
 
@@ -49,4 +49,4 @@ The frontend is the only public container. It proxies all `/api/*` requests to F
 
 ## YouTube-only hybrid update
 
-`ENABLED_PLATFORMS=youtube` limits active ingestion to YouTube. Only video titles are classified; descriptions and comments are excluded. General and short-duration searches run across public channels, grouped to stay within quota; the first upgraded sync backfills `YOUTUBE_INITIAL_LOOKBACK_DAYS=7`. Local sentiment and sarcasm models create target-wise results; only combined confidence below `HF_CONFIDENCE_THRESHOLD=0.60` goes to Groq. The sarcasm repository does not contain tokenizer files, so keep the pinned `SARCASM_TOKENIZER_MODEL` and `SARCASM_TOKENIZER_REVISION` values. The default verifier is `qwen/qwen3.8-27b` and supports positive, negative, neutral, and mixed. Missing/invalid Groq credentials or model access leave low-confidence records pending. `HF_TOKEN` is optional for the public models. See `MODEL-VALIDATION.md` for measured limitations.
+`ENABLED_PLATFORMS=youtube` limits active ingestion to YouTube. Only video titles are classified; descriptions and comments are excluded. General and short-duration searches run across public channels, grouped to stay within quota; the first upgraded sync backfills `YOUTUBE_INITIAL_LOOKBACK_DAYS=7`. Cardiff sentiment runs locally, and results below `HF_CONFIDENCE_THRESHOLD=0.80` or with ambiguous target attribution go to Gemini. The default verifier is `gemini-3.5-flash-lite` and supports positive, negative, neutral, and mixed. Missing or invalid Gemini credentials leave verification-dependent records pending. `HF_TOKEN` is optional for the public model. See `MODEL-VALIDATION.md` for measured limitations.

@@ -44,9 +44,12 @@ def test_keyword_matching_hindi_and_pk():
 def test_token_only_apify_inputs_are_platform_specific():
     since = now() - timedelta(hours=2)
     keywords = ['Jan Suraaj', 'Prashant Kishore']
-    assert _actor_input('facebook', '', keywords, since, 20)['searchType'] == 'posts'
-    assert _actor_input('instagram', '', keywords, since, 20)['searchQueries'] == keywords
-    assert _actor_input('x', '', keywords, since, 20)['searchTerms'] == keywords
+    instagram = _actor_input('instagram', keywords, since, 20)
+    assert instagram['resultsType'] == 'posts'
+    assert instagram['searchType'] == 'hashtag'
+    assert instagram['search'] == 'JanSuraaj,PrashantKishore'
+    assert instagram['onlyPostsNewerThan'].endswith('Z')
+    assert _actor_input('x', keywords, since, 20)['searchTerms'] == keywords
 
 
 @pytest.mark.asyncio
@@ -73,7 +76,7 @@ async def test_negative_post_telegram_alert_is_idempotent(monkeypatch):
         automation_start_hour = 6
         automation_end_hour = 22
     monkeypatch.setattr('app.services.config', lambda: Settings())
-    monkeypatch.setattr('app.services.within_automation_window', lambda value=None: True)
+    monkeypatch.setattr('app.services.within_automation_window', lambda *args, **kwargs: True)
     requests = []
     def handler(req):
         requests.append(req)
@@ -105,7 +108,7 @@ async def test_old_negative_post_is_skipped_without_telegram_delivery(monkeypatc
         telegram_chat_id = '-1001234567890'
         reporting_timezone = 'Asia/Kolkata'
     monkeypatch.setattr('app.services.config', lambda: Settings())
-    monkeypatch.setattr('app.services.within_automation_window', lambda value=None: True)
+    monkeypatch.setattr('app.services.within_automation_window', lambda *args, **kwargs: True)
     requests = []
     async with httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: requests.append(req) or httpx.Response(200, json={'ok': True}))) as client:
@@ -189,35 +192,39 @@ async def test_apify_actor_normalizes_and_filters_items():
     requests = []
     def handler(req):
         requests.append(req)
+        if 'facebook-search-scraper' in str(req.url):
+            return httpx.Response(200, json=[
+                {'pageName': 'Jan Suraaj', 'facebookUrl': 'https://www.facebook.com/jansuraaj'},
+            ])
         return httpx.Response(200, json=[
-            {'postId': '42', 'text': 'Jan Suraaj Party rally update', 'createdAt': now().isoformat(),
-             'postUrl': 'https://example.org/post/42', 'authorName': 'Reporter', 'likesCount': '12'},
+            {'postId': '42', 'text': 'Jan Suraaj Party rally update', 'time': now().isoformat(),
+             'postUrl': 'https://example.org/post/42', 'pageName': 'Reporter', 'reactionCount': '12'},
             {'postId': '43', 'text': 'Unrelated post', 'createdAt': now().isoformat()},
         ])
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        rows = await apify_posts(client, 'facebook', {'api_key': 'apify-token-value', 'actor_id': 'owner~facebook-actor',
-            'input_template': '{"queries": {{keywords_json}}, "since": "{{since_iso}}"}', 'max_items': 50},
+        rows = await apify_posts(client, 'facebook', {'api_key': 'apify-token-value'},
             ['Jan Suraaj'], now() - timedelta(hours=1))
     assert len(rows) == 1 and rows[0]['external_id'] == '42'
     assert rows[0]['engagement']['likes'] == 12 and rows[0]['source_provider'] == 'apify'
     assert requests[0].headers['Authorization'] == 'Bearer apify-token-value'
-    assert '/actors/owner~facebook-actor/run-sync-get-dataset-items' in str(requests[0].url)
+    assert '/acts/apify~facebook-search-scraper/run-sync-get-dataset-items' in str(requests[0].url)
+    assert '/acts/apify~facebook-posts-scraper/run-sync-get-dataset-items' in str(requests[1].url)
+    assert json.loads(requests[1].content)['startUrls'] == [{'url': 'https://www.facebook.com/jansuraaj'}]
 
 
 @pytest.mark.asyncio
 async def test_apify_normalizes_serialized_facebook_author():
-    captured = []
     def handler(req):
-        captured.append(req)
+        if 'facebook-search-scraper' in str(req.url):
+            return httpx.Response(200, json=[{'facebookUrl': 'https://facebook.com/jagaritbihar'}])
         return httpx.Response(200, json=[{
             'postId': 'fb-1', 'text': 'Jan Suraaj Party teachers update',
             'createdAt': now().isoformat(),
             'author': "{'id': '123', 'name': 'Jagarit Bihar', 'profilePic': 'https://example.org/long.jpg'}",
         }])
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        rows = await apify_posts(client, 'facebook', {
-            'api_key': 'token', 'actor_id': 'apify~facebook-search-scraper', 'max_items': 50,
-        }, ['Jan Suraaj'], now() - timedelta(hours=1))
+        rows = await apify_posts(client, 'facebook', {'api_key': 'token'},
+                                 ['Jan Suraaj'], now() - timedelta(hours=1))
     assert rows[0]['author'] == 'Jagarit Bihar'
 
 
@@ -260,9 +267,19 @@ def test_automation_window_uses_ist(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_apify_rejects_unmapped_dataset():
-    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=[{'text': 'Jan Suraaj update'}]))
-    async with httpx.AsyncClient(transport=transport) as client:
-        with pytest.raises(ProviderError):
-            await apify_posts(client, 'facebook', {'api_key': 'apify-token-value', 'actor_id': 'facebook-actor'},
-                              ['Jan Suraaj'], now() - timedelta(hours=1))
+async def test_youtube_daily_quota_error_is_reported_without_retries():
+    calls = 0
+
+    def handler(req):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429, json={'error': {
+            'message': "Quota exceeded for quota metric 'Search Queries' and limit 'Search Queries per day'",
+            'errors': [{'reason': 'rateLimitExceeded'}],
+        }})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ProviderError, match='daily search quota exhausted'):
+            await request(client, 'GET', 'https://www.googleapis.com/youtube/v3/search')
+
+    assert calls == 1

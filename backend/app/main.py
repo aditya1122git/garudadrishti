@@ -17,12 +17,40 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from typing import Literal
-from .config import config, DEFAULT_APIFY_ACTORS
+from .config import (config, APIFY_SYNC_INTERVAL_HOURS, DEFAULT_AUTOMATION_START_HOUR,
+                     DEFAULT_AUTOMATION_END_HOUR)
 from .connectors import _author_name
 from .sentiment import classifier_status
 from .models import DOCUMENTS, now, Platform, Label
 from .services import POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, PLATFORMS, today, bounds, settings, encrypt, audit, statuses, seed, sync, scheduled_sync
 from .reporting import build_sentiment_pdf
+
+
+def configure_automation_jobs(scheduler, database, client, start_hour: int, end_hour: int):
+    """Replace automation jobs using the administrator's active-hour window."""
+    job_ids = ('all-sources-4h', 'youtube-news-quarter-hour', 'youtube-news-full-hour')
+    for job_id in job_ids:
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+    social_hours = list(range(start_hour, end_hour + 1, APIFY_SYNC_INTERVAL_HOURS))
+    frequent_full_hours = [hour for hour in range(start_hour + 1, end_hour + 1)
+                           if hour not in social_hours]
+    common = dict(max_instances=1, coalesce=True, misfire_grace_time=300)
+    # At each four-hour boundary one combined run avoids overlapping sync jobs.
+    scheduler.add_job(
+        scheduled_sync, 'cron', hour=','.join(map(str, social_hours)), minute=0,
+        args=[database, client, PLATFORMS], id='all-sources-4h', **common,
+    )
+    # YouTube and Google News RSS run every 15 minutes inside the window.
+    scheduler.add_job(
+        scheduled_sync, 'cron', hour=f'{start_hour}-{end_hour - 1}', minute='15,30,45',
+        args=[database, client, ['youtube', 'news']], id='youtube-news-quarter-hour', **common,
+    )
+    if frequent_full_hours:
+        scheduler.add_job(
+            scheduled_sync, 'cron', hour=','.join(map(str, frequent_full_hours)), minute=0,
+            args=[database, client, ['youtube', 'news']], id='youtube-news-full-hour', **common,
+        )
 
 
 @asynccontextmanager
@@ -52,8 +80,22 @@ async def lifespan(app):
         await db.tracked_keywords.update_one({'keyword': term}, {'$setOnInsert': {'keyword': term, 'is_active': True}}, upsert=True)
     await db.settings.update_one({'_id': 'main'}, {
         '$set': {'threshold': 500},
+        '$setOnInsert': {
+            'automation_start_hour': DEFAULT_AUTOMATION_START_HOUR,
+            'automation_end_hour': DEFAULT_AUTOMATION_END_HOUR,
+        },
         '$unset': {'email': '', 'email_enabled': '', 'webhook_enabled': '', 'webhook_secret': ''},
     }, upsert=True)
+    # Backfill the defaults for databases created before editable scheduling;
+    # later startups preserve the administrator's saved values.
+    await db.settings.update_one(
+        {'_id': 'main', 'automation_start_hour': {'$exists': False}},
+        {'$set': {'automation_start_hour': DEFAULT_AUTOMATION_START_HOUR}},
+    )
+    await db.settings.update_one(
+        {'_id': 'main', 'automation_end_hour': {'$exists': False}},
+        {'$set': {'automation_end_hour': DEFAULT_AUTOMATION_END_HOUR}},
+    )
     # Repair historical Facebook rows created when an Actor serialized its
     # author object into a string. This keeps the UI and exports readable.
     async for stored in db.posts.find({'platform': 'facebook', 'author': {'$regex': r'^\s*\{'}}, {'author': 1}):
@@ -61,24 +103,28 @@ async def lifespan(app):
         if cleaned_author != stored.get('author'):
             await db.posts.update_one({'_id': stored['_id']}, {'$set': {'author': cleaned_author}})
     if c.youtube_api_key and not c.seed_mock_data and 'youtube' in c.enabled_platforms.split(','):
-        await db.platform_credentials.update_one({'platform': 'youtube'}, {'$setOnInsert': dict(platform='youtube', mode='official',
-            encrypted_api_key=encrypt({'api_key': c.youtube_api_key}), status='pending', last_synced_at=None)}, upsert=True)
+        # YOUTUBE_API_KEY is the source of truth. Using $setOnInsert here left a
+        # stale encrypted key in MongoDB whenever an operator rotated the key in
+        # .env, while the UI continued to report the old credential's failure.
+        await db.platform_credentials.update_one({'platform': 'youtube'}, {
+            '$set': dict(platform='youtube', mode='official',
+                         encrypted_api_key=encrypt({'api_key': c.youtube_api_key})),
+            '$setOnInsert': dict(status='pending', last_synced_at=None),
+        }, upsert=True)
     for p in ['facebook', 'instagram', 'x']:
-        actor_id = getattr(c, f'apify_{p}_actor_id')
-        if c.apify_api_token and actor_id and not c.seed_mock_data and p in c.enabled_platforms.split(','):
-            secret = {'api_key': c.apify_api_token, 'actor_id': actor_id,
-                      'input_template': getattr(c, f'apify_{p}_input_json'), 'max_items': c.apify_max_items}
+        if c.apify_api_token and not c.seed_mock_data and p in c.enabled_platforms.split(','):
+            secret = {'api_key': c.apify_api_token}
             await db.platform_credentials.update_one({'platform': p}, {'$set': dict(platform=p, mode='apify',
                 encrypted_api_key=encrypt(secret), status='pending', last_synced_at=None)}, upsert=True)
         elif not c.seed_mock_data:
             await db.platform_credentials.delete_one({'platform': p, 'mode': {'$ne': 'apify'}})
     if not c.seed_mock_data and 'news' in c.enabled_platforms.split(','):
-        news_credential = await db.platform_credentials.find_one({'platform': 'news'})
-        if not news_credential or news_credential.get('mode') != 'official':
-            await db.platform_credentials.update_one({'platform': 'news'}, {'$set': dict(
-                platform='news', mode='official', encrypted_api_key=encrypt({}), status='pending',
-                last_synced_at=None, error=None,
-            ), '$unset': {'last_attempt_at': ''}}, upsert=True)
+        # News is always credential-free Google RSS. Repair any stale
+        # credential/error left by older deployments before the next run.
+        await db.platform_credentials.update_one({'platform': 'news'}, {'$set': dict(
+            platform='news', mode='official', encrypted_api_key=encrypt({}), status='pending',
+            error=None,
+        ), '$unset': {'last_attempt_at': ''}}, upsert=True)
     if not c.seed_mock_data and 'youtube' in c.enabled_platforms.split(','):
         # One-time scope upgrade: refresh the last day using complete video snippets.
         await db.platform_credentials.update_one({'platform': 'youtube',
@@ -91,33 +137,21 @@ async def lifespan(app):
         # The active YouTube scope is deliberately title-only.
         await db.posts.update_many({'platform': 'youtube', 'content_scope': 'youtube-title-only-v2'},
                                    {'$unset': {'description': ''}})
-    if not c.seed_mock_data:
-        # Schema v4 combines local sentiment, sarcasm, language and entity signals.
-        # Reclassify active records from every enabled source exactly once.
-        await db.posts.update_many({**POST_SCOPE, 'demo': False, 'sentiment': {'$ne': None},
-                                    'sentiment_schema_version': {'$ne': 4}},
-                                   {'$set': {'sentiment': None, 'classification_status': 'pending'},
-                                    '$unset': {'classification_error': '', 'hf_candidate': ''}})
+    # Classified posts are immutable during normal startup and ingestion. Model
+    # upgrades must use an explicit maintenance migration; silently clearing
+    # sentiment here caused historical posts to join the new-post queue again.
     if c.seed_mock_data:
         await seed(db)
         await sync(db, app.state.http)
     scheduler = AsyncIOScheduler(timezone=c.reporting_timezone)
+    app.state.scheduler = scheduler
     if c.scheduler_enabled:
-        start_hour, end_hour = c.automation_start_hour, c.automation_end_hour
-        apify_hours = list(range(start_hour, end_hour + 1, c.apify_sync_interval_hours))
-        combined_hours = ','.join(map(str, apify_hours))
-        youtube_only_hours = [hour for hour in range(start_hour + 1, end_hour)
-                              if hour not in apify_hours]
-        common = dict(max_instances=1, coalesce=True, misfire_grace_time=300)
-        # Collision-free schedule: combined source runs own the 4-hour boundary;
-        # YouTube fills every other 15-minute slot from 06:00 through 22:00.
-        scheduler.add_job(scheduled_sync, 'cron', hour=combined_hours, minute=0,
-                          args=[db, app.state.http, PLATFORMS], id='all-sources-4h', **common)
-        scheduler.add_job(scheduled_sync, 'cron', hour=f'{start_hour}-{end_hour - 1}', minute='15,30,45',
-                          args=[db, app.state.http, ['youtube']], id='youtube-quarter-hour', **common)
-        if youtube_only_hours:
-            scheduler.add_job(scheduled_sync, 'cron', hour=','.join(map(str, youtube_only_hours)), minute=0,
-                              args=[db, app.state.http, ['youtube']], id='youtube-full-hour', **common)
+        prefs = await settings(db)
+        configure_automation_jobs(
+            scheduler, db, app.state.http,
+            prefs.get('automation_start_hour', DEFAULT_AUTOMATION_START_HOUR),
+            prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR),
+        )
         scheduler.start()
     yield
     if scheduler.running:
@@ -239,12 +273,18 @@ async def posts(q: str = Query('', max_length=200), platform: Platform | None = 
 
 @app.get('/api/settings')
 async def read_settings(user=Depends(current_user)):
+    prefs = await settings(db())
     return serialize({'keywords': await db().tracked_keywords.find({}, {'_id': 0}).to_list(None),
                       'credentials': await db().platform_credentials.find({'platform': {'$in': PLATFORMS}}, {'encrypted_api_key': 0}).to_list(None),
-                      'sources': await statuses(db()), 'model': config().hf_model, 'classifier': classifier_status()})
+                      'sources': await statuses(db()), 'model': config().hf_model, 'classifier': classifier_status(),
+                      'automation_start_hour': prefs.get('automation_start_hour', DEFAULT_AUTOMATION_START_HOUR),
+                      'automation_end_hour': prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR),
+                      'timezone': config().reporting_timezone})
 
 class Preferences(BaseModel):
     keywords: list[str] = Field(min_length=1, max_length=30)
+    automation_start_hour: int = Field(ge=0, le=22)
+    automation_end_hour: int = Field(ge=1, le=23)
 
 
 @app.put('/api/settings')
@@ -252,20 +292,32 @@ async def update_settings(value: Preferences, user=Depends(admin)):
     if any(not k.strip() or len(k) > 100 for k in value.keywords):
         raise HTTPException(422, 'Keywords must contain 1-100 characters')
     terms = list(dict.fromkeys(k.strip() for k in value.keywords))
+    if value.automation_start_hour >= value.automation_end_hour:
+        raise HTTPException(422, 'Automation end time must be after start time')
     for term in terms:
         await db().tracked_keywords.update_one({'keyword': term}, {'$set': {'is_active': True}}, upsert=True)
     await db().tracked_keywords.update_many({'keyword': {'$nin': terms}}, {'$set': {'is_active': False}})
-    await audit(db(), user, 'settings.update')
-    return {'saved': True}
+    await db().settings.update_one({'_id': 'main'}, {'$set': {
+        'automation_start_hour': value.automation_start_hour,
+        'automation_end_hour': value.automation_end_hour,
+    }}, upsert=True)
+    if config().scheduler_enabled:
+        configure_automation_jobs(
+            app.state.scheduler, db(), app.state.http,
+            value.automation_start_hour, value.automation_end_hour,
+        )
+    await audit(db(), user, 'settings.update', {
+        'automation_start_hour': value.automation_start_hour,
+        'automation_end_hour': value.automation_end_hour,
+    })
+    return {'saved': True, 'automation_start_hour': value.automation_start_hour,
+            'automation_end_hour': value.automation_end_hour}
 
 
 class CredentialInput(BaseModel):
     platform: Literal['facebook', 'instagram', 'x', 'youtube']
     mode: Literal['official', 'apify'] = 'official'
     api_key: str = Field(min_length=10, max_length=10000)
-    actor_id: str = Field(default='', max_length=200)
-    input_template: str = Field(default='', max_length=20000)
-    max_items: int = Field(default=200, ge=1, le=1000)
 
 @app.put('/api/credentials')
 async def credentials(value: CredentialInput, user=Depends(admin)):
@@ -275,20 +327,7 @@ async def credentials(value: CredentialInput, user=Depends(admin)):
         raise HTTPException(422, 'YouTube uses the official Data API')
     if value.platform != 'youtube' and value.mode != 'apify':
         raise HTTPException(422, 'Facebook, Instagram and X use Apify')
-    if value.mode == 'apify':
-        import json, re
-        value.actor_id = value.actor_id.strip() or DEFAULT_APIFY_ACTORS[value.platform]
-        if not re.fullmatch(r'[A-Za-z0-9_-]+(?:[~/][A-Za-z0-9_.-]+)?', value.actor_id):
-            raise HTTPException(422, 'A valid Apify Actor ID is required')
-        if value.input_template:
-            try:
-                rendered = value.input_template.replace('{{keywords_json}}', '[]').replace('{{query}}', 'query').replace('{{since_iso}}', '2026-01-01T00:00:00Z').replace('{{max_items}}', '1')
-                if not isinstance(json.loads(rendered), dict):
-                    raise ValueError
-            except (json.JSONDecodeError, ValueError):
-                raise HTTPException(422, 'Apify input template must render to a JSON object')
-    secret = {'api_key': value.api_key, 'actor_id': value.actor_id,
-              'input_template': value.input_template, 'max_items': value.max_items}
+    secret = {'api_key': value.api_key}
     await db().platform_credentials.update_one({'platform': value.platform}, {'$set': dict(platform=value.platform, mode=value.mode,
         encrypted_api_key=encrypt(secret), status='pending', error=None)}, upsert=True)
     await audit(db(), user, 'credentials.rotate', {'platform': value.platform})
@@ -318,7 +357,7 @@ class ProfileInput(BaseModel):
     name: str = Field(min_length=2, max_length=80)
     email: str = Field(min_length=3, max_length=254)
     current_password: str = Field(min_length=1, max_length=72)
-    new_password: str = Field(default='', max_length=72)
+    new_password: str = Field(default='', max_length=14)
 
 
 @app.put('/api/profile')
@@ -332,8 +371,8 @@ async def update_profile(value: ProfileInput, user=Depends(current_user)):
         raise HTTPException(401, 'Current password is incorrect')
     changes = {'name': name, 'email': email}
     if value.new_password:
-        if len(value.new_password) < 14 or len(value.new_password.encode()) > 72:
-            raise HTTPException(422, 'New password must contain 14-72 UTF-8 bytes')
+        if len(value.new_password) < 8 or len(value.new_password) > 14:
+            raise HTTPException(422, 'New password must contain 8-14 characters')
         changes['hashed_password'] = (await asyncio.to_thread(
             bcrypt.hashpw, value.new_password.encode(), bcrypt.gensalt())).decode()
     try:

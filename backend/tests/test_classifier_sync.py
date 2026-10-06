@@ -42,3 +42,45 @@ async def test_local_classifier_only_processes_pending_live_posts(monkeypatch, f
         assert pending['telegram_notification']['status'] == 'pending'
     assert (await db.posts.find_one({'external_id': 'classified'}))['sentiment'] == {'label': 'positive'}
     assert (await db.posts.find_one({'external_id': 'demo'}))['sentiment'] is None
+
+
+@pytest.mark.asyncio
+async def test_completed_post_is_not_classified_again_on_later_sync(monkeypatch):
+    db = AsyncMongoMockClient(tz_aware=True).test
+    await db.posts.insert_one({
+        'platform': 'x', 'external_id': 'once', 'sentiment': None, 'demo': False,
+        'content': 'Only classify this once', 'published_at': now(),
+    })
+
+    class Settings:
+        seed_mock_data = False
+        hf_batch_size = 16
+        reporting_timezone = 'Asia/Kolkata'
+        enabled_platforms = 'x'
+
+    class Engine:
+        provenance = 'public/model@pinned-commit'
+        calls = 0
+
+        async def classify(self, texts):
+            self.calls += 1
+            assert self.calls == 1
+            assert texts == ['Only classify this once']
+            return [Result(sentiment='positive', confidence=.9, reason='Test inference')]
+
+    engine = Engine()
+
+    async def no_op(*args):
+        pass
+
+    monkeypatch.setattr(services, 'config', lambda: Settings())
+    monkeypatch.setattr(services, 'classifier', lambda: engine)
+    monkeypatch.setattr(services, 'rollup', no_op)
+    monkeypatch.setattr(services, 'notify_negative_posts', no_op)
+
+    await services.sync(db, None)
+    await services.sync(db, None)
+
+    stored = await db.posts.find_one({'external_id': 'once'})
+    assert stored['sentiment']['label'] == 'positive'
+    assert engine.calls == 1
