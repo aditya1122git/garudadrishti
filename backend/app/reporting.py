@@ -18,6 +18,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    CondPageBreak,
     KeepTogether,
     PageBreak,
     PageTemplate,
@@ -38,29 +39,29 @@ MUTED = colors.HexColor('#667085')
 LINE = colors.HexColor('#D9E1EA')
 PALE = colors.HexColor('#F3F6FA')
 RED_PALE = colors.HexColor('#FFF2F1')
+GREEN_PALE = colors.HexColor('#EDF8F4')
+AMBER_PALE = colors.HexColor('#FFF7E8')
+BLUE_PALE = colors.HexColor('#EEF5FF')
 WHITE = colors.white
 
 FONT_DIR = Path(__file__).with_name('assets') / 'fonts'
 
 
 def _fonts() -> tuple[str, str]:
-    """Use the bundled Unicode font so Hindi titles do not become black boxes."""
-    regular = FONT_DIR / 'NotoSansDevanagari.ttf'
-    latin = FONT_DIR / 'NotoSans.ttf'
+    """Embed Poppins, with the existing Unicode fonts as a safe fallback."""
+    regular = FONT_DIR / 'Poppins-Regular.ttf'
+    semibold = FONT_DIR / 'Poppins-SemiBold.ttf'
     try:
-        if 'JanNetraSans' not in pdfmetrics.getRegisteredFontNames():
-            # Noto Sans Devanagari also contains Latin glyphs, so one font can
-            # safely render English, Hinglish, and Hindi in the same paragraph.
-            pdfmetrics.registerFont(TTFont('JanNetraSans', str(regular)))
-            pdfmetrics.registerFont(TTFont('JanNetraSansBold', str(regular)))
-        return 'JanNetraSans', 'JanNetraSansBold'
+        if 'JanNetraPoppins' not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont('JanNetraPoppins', str(regular)))
+            pdfmetrics.registerFont(TTFont('JanNetraPoppinsSemiBold', str(semibold)))
+        return 'JanNetraPoppins', 'JanNetraPoppinsSemiBold'
     except Exception:
-        # The second bundled font still gives a readable report if a runtime
-        # cannot load the Devanagari variable font.
         try:
+            regular = FONT_DIR / 'NotoSansDevanagari.ttf'
             if 'JanNetraSans' not in pdfmetrics.getRegisteredFontNames():
-                pdfmetrics.registerFont(TTFont('JanNetraSans', str(latin)))
-                pdfmetrics.registerFont(TTFont('JanNetraSansBold', str(latin)))
+                pdfmetrics.registerFont(TTFont('JanNetraSans', str(regular)))
+                pdfmetrics.registerFont(TTFont('JanNetraSansBold', str(regular)))
             return 'JanNetraSans', 'JanNetraSansBold'
         except Exception:
             return 'Helvetica', 'Helvetica-Bold'
@@ -102,7 +103,8 @@ def build_sentiment_pdf(
     period: str,
     timezone_name: str,
     rows: list[dict],
-    negative_posts: list[dict],
+    sentiment_posts: list[dict],
+    sentiment_filter: str,
     source_rows: list[dict],
     demo: bool = False,
 ) -> None:
@@ -134,7 +136,7 @@ def build_sentiment_pdf(
         bottomMargin=bottom,
         title=f'JanNetra {period.title()} Sentiment Report',
         author='JanNetra',
-        subject='Sentiment summary and negative-post evidence',
+        subject=f'Sentiment summary and {sentiment_filter} post evidence',
     )
     frame = Frame(left, bottom, page_w - left - right, page_h - top - bottom, id='report-frame', showBoundary=0)
 
@@ -156,7 +158,7 @@ def build_sentiment_pdf(
     doc.addPageTemplates(PageTemplate(id='report', frames=[frame], onPage=page_chrome))
 
     by_platform: dict[str, list[dict]] = defaultdict(list)
-    for post in negative_posts:
+    for post in sentiment_posts:
         by_platform[str(post.get('platform') or 'unknown')].append(post)
 
     total_positive = sum(int(r.get('positive_count', 0)) for r in rows)
@@ -166,14 +168,50 @@ def build_sentiment_pdf(
     total_classified = sum(int(r.get('total_count', 0)) for r in rows)
     negativity = (total_negative / total_classified * 100) if total_classified else 0
 
+    filter_label = 'All sentiments' if sentiment_filter == 'all' else sentiment_filter.title()
+    hero = Table([[
+        Paragraph('JANETRA INTELLIGENCE', ParagraphStyle(
+            name='JNHeroEyebrow', parent=styles['JNSubtitle'], textColor=colors.HexColor('#9DC5FF'),
+            fontName=bold, fontSize=7.5, leading=10, letterSpacing=1.1,
+        )),
+        Paragraph(filter_label.upper(), ParagraphStyle(
+            name='JNFilterBadge', parent=styles['JNMeta'], textColor=WHITE,
+            fontName=bold, alignment=TA_RIGHT,
+        )),
+    ], [
+        Paragraph('Sentiment Report', ParagraphStyle(
+            name='JNHeroTitle', parent=styles['JNTitle'], textColor=WHITE, fontSize=25, leading=30,
+        )),
+        '',
+    ], [
+        Paragraph(
+            f'{period.title()} &nbsp;|&nbsp; {_clean(start)} to {_clean(end)} &nbsp;|&nbsp; {escape(timezone_name)}',
+            ParagraphStyle(name='JNHeroMeta', parent=styles['JNSubtitle'], textColor=colors.HexColor('#DCEAFF')),
+        ),
+        '',
+    ]], colWidths=[120*mm, 53*mm])
+    hero.setStyle(TableStyle([
+        ('SPAN', (0, 1), (1, 1)), ('SPAN', (0, 2), (1, 2)),
+        ('BACKGROUND', (0, 0), (-1, -1), NAVY),
+        ('BOX', (0, 0), (-1, -1), 0, NAVY),
+        ('LEFTPADDING', (0, 0), (-1, -1), 9*mm),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 9*mm),
+        ('TOPPADDING', (0, 0), (-1, 0), 6*mm),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 1*mm),
+        ('TOPPADDING', (0, 1), (-1, 1), 0),
+        ('BOTTOMPADDING', (0, 1), (-1, 1), 1*mm),
+        ('TOPPADDING', (0, 2), (-1, 2), 0),
+        ('BOTTOMPADDING', (0, 2), (-1, 2), 7*mm),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+
     story = [
         Spacer(1, 4 * mm),
-        Paragraph('JanNetra Sentiment Report' + ('  |  DEMO DATA' if demo else ''), styles['JNTitle']),
-        Paragraph(
-            f'{period.title()} report &nbsp;&nbsp;|&nbsp;&nbsp; {_clean(start)} to {_clean(end)} '
-            f'&nbsp;&nbsp;|&nbsp;&nbsp; Generated for {escape(timezone_name)}',
-            styles['JNSubtitle'],
-        ),
+        hero,
+        Paragraph('DEMO DATA' if demo else 'LIVE MONITORING DATA', ParagraphStyle(
+            name='JNMode', parent=styles['JNMeta'], fontName=bold, textColor=BLUE,
+            alignment=TA_RIGHT, spaceBefore=3*mm,
+        )),
         Spacer(1, 7 * mm),
     ]
 
@@ -192,9 +230,15 @@ def build_sentiment_pdf(
     metric_table = Table([metric_cells], colWidths=[(page_w - left - right) / 6] * 6, rowHeights=[20 * mm])
     metric_table.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('BOX', (0, 0), (-1, -1), .6, LINE),
-        ('INNERGRID', (0, 0), (-1, -1), .4, LINE),
-        ('BACKGROUND', (0, 0), (-1, -1), PALE),
+        ('BOX', (0, 0), (-1, -1), .5, LINE),
+        ('INNERGRID', (0, 0), (-1, -1), .35, LINE),
+        ('BACKGROUND', (0, 0), (-1, -1), WHITE),
+        ('LINEABOVE', (0, 0), (0, 0), 2.2, INK),
+        ('LINEABOVE', (1, 0), (1, 0), 2.2, GREEN),
+        ('LINEABOVE', (2, 0), (2, 0), 2.2, RED),
+        ('LINEABOVE', (3, 0), (3, 0), 2.2, MUTED),
+        ('LINEABOVE', (4, 0), (4, 0), 2.2, AMBER),
+        ('LINEABOVE', (5, 0), (5, 0), 2.2, RED),
         ('LEFTPADDING', (0, 0), (-1, -1), 3),
         ('RIGHTPADDING', (0, 0), (-1, -1), 3),
     ]))
@@ -240,29 +284,33 @@ def build_sentiment_pdf(
         ('TOPPADDING', (0, 0), (-1, -1), 5),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
     ]))
+    story.append(sources)
+    story.append(PageBreak() if sentiment_posts else Spacer(1, 7 * mm))
     story.extend([
-        sources,
-        Spacer(1, 7 * mm),
-        Paragraph('Negative-post evidence', styles['JNSection']),
+        Paragraph(f'{filter_label} post evidence', styles['JNSection']),
         Paragraph(
-            f'{len(negative_posts)} negative posts are listed below. Each available source URL is embedded as a clickable link.',
+            f'{len(sentiment_posts)} matching posts are listed below. Each available source URL is embedded as a clickable link.',
             styles['JNSubtitle'],
         ),
     ])
 
     platform_order = ['facebook', 'instagram', 'x', 'youtube', 'news']
+    first_platform = True
     for platform in platform_order + sorted(set(by_platform) - set(platform_order)):
         posts = by_platform.get(platform, [])
         if not posts:
             continue
         story.extend([
-            PageBreak(),
-            Paragraph(f'{escape(platform.title())} negative posts', styles['JNPlatform']),
+            Spacer(1, 0 if first_platform else 7 * mm),
+            CondPageBreak(38 * mm),
+            Paragraph(f'{escape(platform.title())} {filter_label.lower()} posts', styles['JNPlatform']),
             Paragraph(f'{len(posts)} posts in the selected period', styles['JNSubtitle']),
             Spacer(1, 4 * mm),
         ])
+        first_platform = False
         for index, post in enumerate(posts, 1):
             sentiment = post.get('sentiment') or {}
+            label = str(sentiment.get('label') or 'unclassified').lower()
             engagement = post.get('engagement') or {}
             confidence = round(float(sentiment.get('confidence', 0)) * 100)
             engagement_total = int(post.get('engagement_score') or (
@@ -276,14 +324,24 @@ def build_sentiment_pdf(
             )
             meta = Paragraph(
                 f'{_published(post.get("published_at"), timezone_name)} &nbsp;&nbsp;|&nbsp;&nbsp; '
-                f'Confidence {confidence}% &nbsp;&nbsp;|&nbsp;&nbsp; Engagement {engagement_total:,}',
+                f'{escape(label.title())} &nbsp;&nbsp;|&nbsp;&nbsp; Confidence {confidence}% '
+                f'&nbsp;&nbsp;|&nbsp;&nbsp; Engagement {engagement_total:,}',
                 styles['JNMeta'],
             )
             body = Paragraph(_clean(post.get('content') or 'Content unavailable'), styles['JNBody'])
             link_para = Paragraph(link_text, styles['JNLink'])
             card = Table([[heading], [meta], [body], [link_para]], colWidths=[page_w - left - right - 8*mm])
+            card_tint = {
+                'positive': GREEN_PALE, 'negative': RED_PALE,
+                'neutral': PALE, 'mixed': AMBER_PALE,
+            }.get(label, BLUE_PALE)
+            card_accent = {
+                'positive': GREEN, 'negative': RED,
+                'neutral': MUTED, 'mixed': AMBER,
+            }.get(label, BLUE)
             card.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 1), RED_PALE),
+                ('BACKGROUND', (0, 0), (-1, 1), card_tint),
+                ('LINEBEFORE', (0, 0), (0, -1), 2.4, card_accent),
                 ('BOX', (0, 0), (-1, -1), .55, LINE),
                 ('LINEBELOW', (0, 1), (-1, 1), .35, LINE),
                 ('LEFTPADDING', (0, 0), (-1, -1), 8),
@@ -293,7 +351,8 @@ def build_sentiment_pdf(
             ]))
             story.extend([KeepTogether([card, Spacer(1, 3 * mm)])])
 
-    if not negative_posts:
-        story.extend([Spacer(1, 5 * mm), Paragraph('No classified negative posts were found in this reporting period.', styles['JNBody'])])
+    if not sentiment_posts:
+        story.extend([Spacer(1, 5 * mm), Paragraph(
+            f'No classified {filter_label.lower()} posts were found in this reporting period.', styles['JNBody'])])
 
     doc.build(story)

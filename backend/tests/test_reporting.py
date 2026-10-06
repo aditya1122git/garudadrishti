@@ -6,7 +6,7 @@ from pypdf import PdfReader
 from app.reporting import build_sentiment_pdf
 
 
-def test_pdf_lists_negative_posts_by_platform_with_clickable_links():
+def test_pdf_lists_filtered_posts_by_platform_with_clickable_links_and_poppins():
     stream = BytesIO()
     posts = [
         {
@@ -39,7 +39,8 @@ def test_pdf_lists_negative_posts_by_platform_with_clickable_links():
             'negative_count': 1, 'neutral_count': 1, 'mixed_count': 0,
             'total_count': 4, 'negativity_index': 25,
         }],
-        negative_posts=posts,
+        sentiment_posts=posts,
+        sentiment_filter='negative',
         source_rows=[{'platform': 'facebook', 'source': 'Apify Actor', 'status': 'live'}],
     )
 
@@ -57,3 +58,9 @@ def test_pdf_lists_negative_posts_by_platform_with_clickable_links():
     assert 'A critical Facebook post' in text
     assert 'A critical YouTube title' in text
     assert links == {post['url'] for post in posts}
+    embedded_fonts = {
+        str(font.get_object().get('/BaseFont'))
+        for page in reader.pages
+        for font in (page['/Resources'].get('/Font') or {}).get_object().values()
+    }
+    assert any('Poppins' in name for name in embedded_fonts)

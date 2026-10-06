@@ -1324,6 +1324,7 @@ function ReportModal({ close }: { close: () => void }) {
   const beginLoading = React.useContext(GlobalLoadingContext);
   const [period, setPeriod] = useState("daily"),
     [format, setFormat] = useState("pdf"),
+    [sentiment, setSentiment] = useState("all"),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   return (
@@ -1338,6 +1339,16 @@ function ReportModal({ close }: { close: () => void }) {
           <option value="daily">Today</option>
           <option value="weekly">Last 7 days</option>
           <option value="monthly">Last 30 days</option>
+        </select>
+      </label>
+      <label>
+        Sentiment
+        <select className="form-select" value={sentiment} onChange={(e) => setSentiment(e.target.value)}>
+          <option value="all">All sentiments</option>
+          <option value="positive">Positive</option>
+          <option value="negative">Negative</option>
+          <option value="mixed">Mixed</option>
+          <option value="neutral">Neutral</option>
         </select>
       </label>
       <label>
@@ -1356,12 +1367,12 @@ function ReportModal({ close }: { close: () => void }) {
           setBusy(true);
           try {
             const response = await api(
-              `/export?period=${period}&format=${format}`,
+              `/export?period=${period}&format=${format}&sentiment=${sentiment}`,
             );
             const url = URL.createObjectURL(await response.blob());
             const a = document.createElement("a");
             a.href = url;
-            a.download = `jannetra-${period}.${format}`;
+            a.download = `jannetra-${period}-${sentiment}.${format}`;
             a.click();
             setTimeout(() => URL.revokeObjectURL(url), 1000);
             close();

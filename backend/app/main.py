@@ -463,7 +463,9 @@ async def add_user(value: NewUser, user=Depends(admin)):
     return {'created': True}
 
 @app.get('/api/export')
-async def export(period: Literal['daily', 'weekly', 'monthly'] = 'daily', format: Literal['csv', 'pdf'] = 'csv', user=Depends(current_user)):
+async def export(period: Literal['daily', 'weekly', 'monthly'] = 'daily', format: Literal['csv', 'pdf'] = 'csv',
+                 sentiment: Literal['all', 'positive', 'negative', 'neutral', 'mixed'] = 'all',
+                 user=Depends(current_user)):
     count = {'daily': 1, 'weekly': 7, 'monthly': 30}[period]
     end_day = today()
     start = (date.fromisoformat(end_day) - timedelta(days=count - 1)).isoformat()
@@ -473,17 +475,27 @@ async def export(period: Literal['daily', 'weekly', 'monthly'] = 'daily', format
     fields = ['date', 'platform', 'positive_count', 'negative_count', 'neutral_count', 'mixed_count', 'total_count', 'negativity_index']
     source_status = '; '.join(f'{s["platform"]}: {s["source"]}/{s["status"]}' for s in source_rows)
     if format == 'csv':
-        stream = io.StringIO(); writer = csv.DictWriter(stream, fieldnames=fields + ['mode', 'source_status'], extrasaction='ignore'); writer.writeheader()
-        writer.writerows([{**r, 'mode': 'DEMO' if config().seed_mock_data else 'LIVE', 'source_status': source_status} for r in rows])
+        selected_field = f'{sentiment}_count' if sentiment != 'all' else None
+        csv_fields = fields + ['sentiment_filter', 'selected_count', 'mode', 'source_status']
+        stream = io.StringIO(); writer = csv.DictWriter(stream, fieldnames=csv_fields, extrasaction='ignore'); writer.writeheader()
+        writer.writerows([{
+            **r,
+            'sentiment_filter': sentiment,
+            'selected_count': r.get(selected_field, 0) if selected_field else r.get('total_count', 0),
+            'mode': 'DEMO' if config().seed_mock_data else 'LIVE',
+            'source_status': source_status,
+        } for r in rows])
         content = stream.getvalue().encode('utf-8-sig'); mime = 'text/csv'
     else:
         range_start, _ = bounds(start)
         _, range_end = bounds(end_day)
-        negative_posts = await db().posts.find({
+        sentiment_match = ({'$in': ['positive', 'negative', 'neutral', 'mixed']}
+                           if sentiment == 'all' else sentiment)
+        sentiment_posts = await db().posts.find({
             **POST_SCOPE,
             'published_at': {'$gte': range_start, '$lt': range_end},
             'platform': {'$in': connected},
-            'sentiment.label': 'negative',
+            'sentiment.label': sentiment_match,
             'demo': config().seed_mock_data,
         }, {
             '_id': 0, 'platform': 1, 'author': 1, 'content': 1, 'url': 1,
@@ -498,10 +510,11 @@ async def export(period: Literal['daily', 'weekly', 'monthly'] = 'daily', format
             period=period,
             timezone_name=config().reporting_timezone,
             rows=rows,
-            negative_posts=negative_posts,
+            sentiment_posts=sentiment_posts,
+            sentiment_filter=sentiment,
             source_rows=source_rows,
             demo=config().seed_mock_data,
         )
         content = stream.getvalue(); mime = 'application/pdf'
-    await audit(db(), user, 'export.' + format, {'period': period})
-    return Response(content, media_type=mime, headers={'Content-Disposition': f'attachment; filename="jannetra-{period}-{today()}.{format}"'})
+    await audit(db(), user, 'export.' + format, {'period': period, 'sentiment': sentiment})
+    return Response(content, media_type=mime, headers={'Content-Disposition': f'attachment; filename="jannetra-{period}-{sentiment}-{today()}.{format}"'})

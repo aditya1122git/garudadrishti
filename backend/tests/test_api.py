@@ -54,7 +54,11 @@ def test_exports(client, auth):
     csv_response = client.get('/api/export?period=weekly&format=csv', headers=auth)
     rows = list(csv.DictReader(io.StringIO(csv_response.content.decode('utf-8-sig'))))
     assert len(rows) == 14 and all(r['mode'] == 'DEMO' for r in rows)
-    pdf = client.get('/api/export?period=monthly&format=pdf', headers=auth)
+    assert all(r['sentiment_filter'] == 'all' and r['selected_count'] == r['total_count'] for r in rows)
+    filtered_csv = client.get('/api/export?period=daily&format=csv&sentiment=positive', headers=auth)
+    filtered_rows = list(csv.DictReader(io.StringIO(filtered_csv.content.decode('utf-8-sig'))))
+    assert all(r['sentiment_filter'] == 'positive' and r['selected_count'] == r['positive_count'] for r in filtered_rows)
+    pdf = client.get('/api/export?period=monthly&format=pdf&sentiment=mixed', headers=auth)
     assert pdf.status_code == 200 and pdf.content.startswith(b'%PDF')
 
 
