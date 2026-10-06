@@ -12,7 +12,7 @@ from app.config import Config
 from app.models import now
 from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window
 from app.sentiment import Classifier
-from app.connectors import NEWS_CHANNELS, NEWS_SEARCH_QUERIES, matches, apify_posts, google_news_posts, _actor_input, ProviderError, request
+from app.connectors import NEWS_CHANNELS, NEWS_SEARCH_QUERIES, matches, apify_posts, google_news_posts, _actor_input, _approved_news_source, ProviderError, request
 
 
 def test_timezone_boundary():
@@ -50,6 +50,18 @@ def test_token_only_apify_inputs_are_platform_specific():
     assert instagram['search'] == 'JanSuraaj,PrashantKishore'
     assert instagram['onlyPostsNewerThan'].endswith('Z')
     assert _actor_input('x', keywords, since, 20)['searchTerms'] == keywords
+
+
+@pytest.mark.parametrize('source', [
+    'Dainik Bhaskar', 'jagran.com', 'tv9hindi.com', 'prabhatkhabar.com',
+    'Hindustan', 'ETV Bharat', 'Navbharat Times',
+])
+def test_expanded_bihar_news_sources_are_approved(source):
+    assert _approved_news_source(source)
+
+
+def test_similarly_named_unapproved_source_is_rejected():
+    assert not _approved_news_source('Hindustan Times')
 
 
 @pytest.mark.asyncio

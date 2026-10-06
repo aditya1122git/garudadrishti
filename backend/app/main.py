@@ -156,7 +156,7 @@ async def lifespan(app):
         # could repeatedly store zero rows. Give the corrected entity-query
         # strategy one bounded backfill, including on existing deployments.
         await db.platform_credentials.update_one({
-            'platform': 'news', 'search_strategy': {'$ne': 'entity-rss-v2'},
+            'platform': 'news', 'search_strategy': {'$ne': 'entity-rss-v3'},
         }, {'$set': {'last_synced_at': None, 'status': 'pending'},
             '$unset': {'last_attempt_at': ''}})
     if not c.seed_mock_data and 'youtube' in c.enabled_platforms.split(','):

@@ -25,7 +25,9 @@ from .config import (
 NEWS_CHANNELS = (
     'News18', 'Zee Bihar', 'ABP Bihar', 'News State', 'Sahara Samay',
     'Bihar Tak', 'First Bihar', 'Live Cities', 'News4Nation',
-    'Hindustani Media',
+    'Hindustani Media', 'Dainik Jagran Bihar', 'TV9 Bihar/Jharkhand',
+    'Dainik Bhaskar Bihar', 'Prabhat Khabar', 'Live Hindustan Bihar',
+    'ETV Bharat Bihar', 'Navbharat Times Bihar',
 )
 
 NEWS_SEARCH_QUERIES = (
@@ -46,12 +48,23 @@ NEWS_SOURCE_ALIASES = {
     'Live Cities': ('livecities',),
     'News4Nation': ('news4nation',),
     'Hindustani Media': ('hindustanimedia',),
+    'Dainik Jagran Bihar': ('jagran', 'jagrancom'),
+    'TV9 Bihar/Jharkhand': ('tv9hindi', 'tv9bharatvarsh'),
+    'Dainik Bhaskar Bihar': ('dainikbhaskar', 'bhaskarhindi'),
+    'Prabhat Khabar': ('prabhatkhabar',),
+    'Live Hindustan Bihar': ('livehindustan',),
+    'ETV Bharat Bihar': ('etvbharat',),
+    'Navbharat Times Bihar': ('navbharattimes',),
 }
+
+NEWS_SOURCE_EXACT_ALIASES = {'hindustan'}
 
 
 def _approved_news_source(value):
     normalized = re.sub(r'[^a-z0-9]+', '', str(value or '').lower())
-    return any(alias in normalized for aliases in NEWS_SOURCE_ALIASES.values() for alias in aliases)
+    return normalized in NEWS_SOURCE_EXACT_ALIASES or any(
+        alias in normalized for aliases in NEWS_SOURCE_ALIASES.values() for alias in aliases
+    )
 
 
 class ProviderError(RuntimeError):
