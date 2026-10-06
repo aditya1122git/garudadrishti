@@ -149,7 +149,10 @@ async def lifespan(app):
         # .env, while the UI continued to report the old credential's failure.
         await db.platform_credentials.update_one({'platform': 'youtube'}, {
             '$set': dict(platform='youtube', mode='official',
-                         encrypted_api_key=encrypt({'api_key': c.youtube_api_key})),
+                         encrypted_api_key=encrypt({
+                             'api_key': c.youtube_api_key,
+                             'backup_api_key': c.youtube_backup_api_key,
+                         })),
             '$setOnInsert': dict(status='pending', last_synced_at=None),
         }, upsert=True)
     for p in ['facebook', 'instagram', 'x']:

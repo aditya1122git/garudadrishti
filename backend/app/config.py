@@ -45,8 +45,8 @@ class Config(BaseSettings):
     enabled_platforms: str = 'facebook,instagram,x,youtube,news'
     apify_api_token: str = ''
     youtube_api_key: str = ''
+    youtube_backup_api_key: str = ''
     youtube_initial_lookback_days: int = 7
-    youtube_terms_per_query: int = 4
     telegram_bot_token: str = ''
     telegram_chat_id: str = ''
     allowed_origins: str = 'http://localhost:5173,http://localhost:8080'
@@ -83,7 +83,7 @@ class Config(BaseSettings):
         if (not 0 <= self.hf_confidence_threshold <= 1
                 or not 1 <= self.gemini_concurrency <= 8):
             raise ValueError('Invalid classifier threshold/concurrency')
-        if not 1 <= self.youtube_initial_lookback_days <= 30 or not 1 <= self.youtube_terms_per_query <= 5:
+        if not 1 <= self.youtube_initial_lookback_days <= 30:
             raise ValueError('Invalid YouTube search coverage settings')
         if set(self.enabled_platforms.split(',')) - {'facebook', 'instagram', 'x', 'youtube', 'news'}:
             raise ValueError('Invalid ENABLED_PLATFORMS')

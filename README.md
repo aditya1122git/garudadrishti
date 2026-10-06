@@ -69,8 +69,8 @@ A local `.env` is provided beside `docker-compose.yml`. It is ignored by Git and
 | `GEMINI_API_KEY`, `GEMINI_MODEL` | Target-aware verifier key and model; default `gemini-3.5-flash-lite` |
 | `HF_CONFIDENCE_THRESHOLD`, `GEMINI_CONCURRENCY` | Gemini gate defaults to 0.80; 2 concurrent calls |
 | `ENABLED_PLATFORMS` | Comma-separated sources: `facebook,instagram,x,youtube,news`; set `youtube` for YouTube-only operation |
-| `YOUTUBE_API_KEY` | YouTube Data API v3 key |
-| `YOUTUBE_INITIAL_LOOKBACK_DAYS`, `YOUTUBE_TERMS_PER_QUERY` | First-run backfill window (7 days) and quota-aware keyword grouping (4 terms) |
+| `YOUTUBE_API_KEY`, `YOUTUBE_BACKUP_API_KEY` | Primary YouTube Data API v3 key and optional quota-fallback key |
+| `YOUTUBE_INITIAL_LOOKBACK_DAYS` | First-run YouTube backfill window (default 7 days) |
 | `APIFY_API_TOKEN` | Shared by the Facebook, Instagram and X connectors; News does not use Apify |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Enable one Telegram message, including the source link, for each newly classified negative post |
 | `ALLOWED_ORIGINS` | Exact CORS origins for the UI |
@@ -101,14 +101,14 @@ This uses built-in sample text only. It does not write posts, connect to social 
 | Platform | Implemented connector | Required access / coverage |
 |---|---|---|
 | X | Configured Apify Actor, normalized output, overlap deduplication and retry/backoff | Apify token, Actor access and the Actor's input schema. |
-| YouTube | Official Data API v3 video search + `videos.list` snippet/statistics | API key and quota. Every 15 minutes inside the admin-configured active window, terms are split into OR groups; each group gets general and `videoDuration=short` searches with deduplication. The initial strategy upgrade backfills 7 days. Only the video title is matched, stored, and classified. Descriptions and comments are excluded. |
+| YouTube | Official Data API v3 video search + `videos.list` snippet/statistics | Every 15 minutes inside the admin-configured active window, one combined search covers all tracked terms and includes regular videos and Shorts. `videos.list` supplies duration and engagement metadata. If the primary key reports quota exhaustion, the connector switches to `YOUTUBE_BACKUP_API_KEY` for the rest of that run. The initial strategy upgrade backfills 7 days. Only the video title is matched, stored, and classified. Descriptions and comments are excluded. |
 | Facebook | Configured Apify Actor | Actor access and a compatible output schema. |
 | Instagram | Configured Apify Actor | Actor access and a compatible output schema. |
 | News | Google News RSS search feeds | Credential-free RSS ingestion runs every 15 minutes inside the admin-configured active window. Approved Bihar coverage includes News18, Zee Bihar, ABP Bihar, News State, Sahara Samay, Bihar Tak, First Bihar, Live Cities, News4Nation, Hindustani Media, Dainik Jagran Bihar, TV9 Bihar/Jharkhand, Dainik Bhaskar Bihar, Prabhat Khabar, Live Hindustan Bihar, ETV Bharat Bihar and Navbharat Times Bihar. The headline is classified and the Google News article link is retained. |
 
 There is no manual upload/CSV/JSON import endpoint or UI; CSV is export only. Missing Actor credentials show **Not connected**, never fabricated zeros. An unavailable source remains identifiable and its last observed figures are marked partial/stale. Zero engagement metrics may represent unavailable fields; ?interactions? is likes + comments + shares, not views.
 
-YouTube Search API is relevance-ranked and does not promise an exhaustive list of every matching upload. JanNetra searches public videos across channels; it cannot use a person's YouTube watch history. Calls are bounded to control quota, and the dedicated short-duration query improves Shorts coverage without claiming that every under-four-minute video is a YouTube Short. The default search cadence is conservative; check the project's actual daily quota before increasing it. Short keywords such as PK are noisy; deactivate them in Settings if appropriate.
+YouTube Search API is relevance-ranked and does not promise an exhaustive list of every matching upload. JanNetra searches public videos across channels; it cannot use a person's YouTube watch history. One combined search per run keeps the normal 06:00-22:00 schedule near 65 search calls per day; manual refreshes add calls. YouTube quota is allocated per Google Cloud project, so use a backup key from another properly configured project if independent fallback capacity is required. Short keywords such as PK are noisy; deactivate them in Settings if appropriate.
 
 ### Apify Actor contract
 

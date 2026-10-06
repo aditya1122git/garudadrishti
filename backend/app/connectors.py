@@ -71,6 +71,10 @@ class ProviderError(RuntimeError):
     pass
 
 
+class DailyQuotaExhausted(ProviderError):
+    pass
+
+
 async def request(client, method, url, **kwargs):
     comments_optional = kwargs.pop('comments_optional', False)
     response_json = kwargs.pop('response_json', True)
@@ -80,17 +84,21 @@ async def request(client, method, url, **kwargs):
             response = await client.request(method, url, **kwargs)
             if comments_optional and response.status_code == 403 and any(e.get('reason') == 'commentsDisabled' for e in response.json().get('error', {}).get('errors', [])):
                 return {'items': []}
-            if response.status_code == 429:
-                # YouTube's exhausted daily search quota cannot recover during
-                # this request. Surface the real cause immediately instead of
-                # spending four backoff attempts and showing a vague outage.
+            if response.status_code in (403, 429):
                 try:
                     error = response.json().get('error', {})
                     message = error.get('message', '')
+                    reasons = {row.get('reason', '') for row in error.get('errors', [])}
                 except (TypeError, ValueError):
-                    message = ''
-                if 'per day' in message.lower() and 'quota' in message.lower():
-                    raise ProviderError('YouTube daily search quota exhausted; retry after quota reset')
+                    message, reasons = '', set()
+                quota_reasons = {
+                    'quotaExceeded', 'dailyLimitExceeded', 'dailyLimitExceededUnreg',
+                    'rateLimitExceeded', 'userRateLimitExceeded',
+                }
+                if reasons & quota_reasons or 'quota' in message.lower():
+                    raise DailyQuotaExhausted('YouTube daily search quota exhausted; retry after quota reset')
+                if response.status_code == 403:
+                    response.raise_for_status()
                 delay = max(float(response.headers.get('retry-after', 0) or 0),
                             float(response.headers.get('x-rate-limit-reset', 0) or 0) - time.time(),
                             2 ** attempt + random.random())
@@ -131,30 +139,46 @@ def post(platform, external_id, author, content, url, timestamp, engagement=None
 
 async def youtube_posts(client, secret, keywords, since):
     base = 'https://www.googleapis.com/youtube/v3/'
-    # Search results are relevance-ranked rather than exhaustive. Split terms into
-    # small OR groups and run an additional official short-duration query per group.
+    keys = list(dict.fromkeys(filter(None, (
+        str(secret.get('api_key', '')).strip(),
+        str(secret.get('backup_api_key', '')).strip(),
+    ))))
+    if not keys:
+        raise ProviderError('YouTube API key is not configured')
+    active_key = 0
+
+    async def youtube_get(endpoint, params):
+        nonlocal active_key
+        while active_key < len(keys):
+            try:
+                return await request(client, 'GET', base + endpoint,
+                                     params={**params, 'key': keys[active_key]})
+            except DailyQuotaExhausted:
+                active_key += 1
+        raise ProviderError('YouTube daily quota exhausted on all configured API keys; retry after quota reset')
+
+    # One combined official search includes regular videos and Shorts. The old
+    # per-group + short-filter approach spent about four times as many quota units.
     rows = []
     videos = {}
-    group_size = config().youtube_terms_per_query
-    for offset in range(0, len(keywords), group_size):
-        query = '|'.join(keywords[offset:offset + group_size])
-        for duration in (None, 'short'):
-            params = dict(key=secret['api_key'], part='snippet', type='video', order='date', maxResults=50,
-                          q=query, publishedAfter=since.isoformat().replace('+00:00', 'Z'))
-            if duration:
-                # The API defines videoDuration=short as under four minutes. It is
-                # the supported search filter that improves Shorts coverage.
-                params['videoDuration'] = duration
-            data = await request(client, 'GET', base + 'search', params=params)
-            for item in data.get('items', []):
-                video_id = item.get('id', {}).get('videoId')
-                if video_id:
-                    videos.setdefault(video_id, set()).add('short-search' if duration else 'general-search')
+    query_terms = []
+    for keyword in dict.fromkeys(k.strip() for k in keywords if k.strip()):
+        if len('|'.join(query_terms + [keyword])) > 450:
+            break
+        query_terms.append(keyword)
+    data = await youtube_get('search', dict(
+        part='snippet', type='video', order='date', maxResults=50,
+        q='|'.join(query_terms), publishedAfter=since.isoformat().replace('+00:00', 'Z'),
+    ))
+    for item in data.get('items', []):
+        video_id = item.get('id', {}).get('videoId')
+        if video_id:
+            videos[video_id] = {'general-search'}
     # Fetch stable video metadata in batches. Sentiment uses the title only.
     ids = list(videos)
     for offset in range(0, len(ids), 50):
-        details = await request(client, 'GET', base + 'videos', params=dict(
-            key=secret['api_key'], part='snippet,statistics,contentDetails', id=','.join(ids[offset:offset + 50])))
+        details = await youtube_get('videos', dict(
+            part='snippet,statistics,contentDetails', id=','.join(ids[offset:offset + 50])))
         for video in details.get('items', []):
             vid, snippet = video['id'], video['snippet']
             title = snippet['title']
@@ -164,7 +188,12 @@ async def youtube_posts(client, secret, keywords, since):
             row = post('youtube', vid, snippet['channelTitle'], title,
                        f'https://www.youtube.com/watch?v={vid}', snippet['publishedAt'],
                        dict(likes=stats.get('likeCount', 0), views=stats.get('viewCount', 0)))
-            short_candidate = 'short-search' in videos[vid]
+            duration = video.get('contentDetails', {}).get('duration', '')
+            duration_match = re.fullmatch(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration)
+            duration_seconds = (int(duration_match.group(1) or 0) * 3600
+                                + int(duration_match.group(2) or 0) * 60
+                                + int(duration_match.group(3) or 0)) if duration_match else None
+            short_candidate = duration_seconds is not None and duration_seconds < 240
             row.update(content_type='short' if short_candidate else 'video', title=title,
                        discovery=sorted(videos[vid]),
                        content_scope='youtube-title-only-v2')

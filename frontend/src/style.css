@@ -17,6 +17,13 @@ body {
   color: var(--ink);
   background: #f4f6f8;
   margin: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+  touch-action: manipulation;
+}
+#root {
+  max-width: 100%;
+  overflow-x: hidden;
 }
 button,
 input,
@@ -1757,6 +1764,19 @@ dialog::backdrop {
   .post-row > div:nth-child(3) {
     text-align: right;
   }
+  .post-row > div:last-child {
+    display: flex;
+    grid-column: 1 / -1;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 10px;
+    border-top: 1px solid #edf0f3;
+    color: #657384;
+  }
+  .post-row > div:last-child small {
+    margin-top: 0;
+  }
   .post-row p {
     font-size: 14px;
   }
@@ -1774,6 +1794,13 @@ dialog::backdrop {
   }
   .post-row > div > strong {
     font-size: 14px;
+  }
+  input,
+  select,
+  textarea,
+  .form-control,
+  .form-select {
+    font-size: 16px;
   }
   .settings-section {
     padding: 18px;

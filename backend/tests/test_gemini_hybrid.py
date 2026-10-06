@@ -163,6 +163,7 @@ async def test_youtube_classifies_title_only_never_description_or_comments():
                 'title': 'Prashant Kishore meeting',
                 'description': 'Full description, not a search excerpt.',
                 'channelTitle': 'News', 'publishedAt': '2026-10-01T00:00:00Z'},
+             'contentDetails': {'duration': 'PT45S'},
              'statistics': {'likeCount': '4', 'viewCount': '90', 'commentCount': '99'}},
             {'id': 'description-only', 'snippet': {
                 'title': 'Unrelated daily bulletin',
@@ -175,10 +176,40 @@ async def test_youtube_classifies_title_only_never_description_or_comments():
         rows = await youtube_posts(
             client, {'api_key': 'test'}, ['Prashant Kishore'], now() - timedelta(days=1),
         )
-    assert paths.count('/youtube/v3/search') == 2 and len(rows) == 1
+    assert paths.count('/youtube/v3/search') == 1 and len(rows) == 1
     assert rows[0]['content'] == 'Prashant Kishore meeting'
     assert 'description' not in rows[0]
     assert rows[0]['engagement']['comments'] == 0
     assert rows[0]['engagement']['views'] == 90
     assert rows[0]['content_scope'] == 'youtube-title-only-v2'
     assert rows[0]['content_type'] == 'short'
+
+
+@pytest.mark.asyncio
+async def test_youtube_rotates_to_backup_key_only_after_quota_exhaustion():
+    keys = []
+
+    def handler(req):
+        key = req.url.params['key']
+        keys.append(key)
+        if key == 'primary':
+            return httpx.Response(403, json={'error': {
+                'message': 'The request cannot be completed because you have exceeded your quota.',
+                'errors': [{'reason': 'quotaExceeded'}],
+            }})
+        if req.url.path.endswith('/search'):
+            return httpx.Response(200, json={'items': [{'id': {'videoId': 'backup-video'}}]})
+        return httpx.Response(200, json={'items': [{
+            'id': 'backup-video',
+            'snippet': {'title': 'Jan Suraaj update', 'channelTitle': 'News',
+                        'publishedAt': '2026-10-06T06:00:00Z'},
+            'statistics': {}, 'contentDetails': {'duration': 'PT5M'},
+        }]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        rows = await youtube_posts(client, {
+            'api_key': 'primary', 'backup_api_key': 'backup',
+        }, ['Jan Suraaj'], now() - timedelta(days=1))
+
+    assert keys == ['primary', 'backup', 'backup']
+    assert len(rows) == 1 and rows[0]['external_id'] == 'backup-video'
