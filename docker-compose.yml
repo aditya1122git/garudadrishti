@@ -11,6 +11,10 @@ services:
       timeout: 5s
       retries: 10
   api:
+    # Hostinger Docker Manager pulls images during deployment instead of
+    # building repository-relative contexts. The build block remains for local
+    # development; GitHub Actions publishes the default image to GHCR.
+    image: ${API_IMAGE:-ghcr.io/aditya1122git/garudadrishti-api:latest}
     build: ./backend
     env_file:
       - path: .env
@@ -60,6 +64,7 @@ services:
       timeout: 5s
       retries: 3
   frontend:
+    image: ${FRONTEND_IMAGE:-ghcr.io/aditya1122git/garudadrishti-frontend:latest}
     build: ./frontend
     # Bind on every VPS interface so http://SERVER_IP:8080 is reachable.
     # Hostinger's firewall must also allow TCP 8080 (or set PUBLIC_PORT=80).
