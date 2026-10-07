@@ -14,9 +14,23 @@ from .sentiment import classifier
 POST_SCOPE = {'$or': [{'platform': {'$ne': 'youtube'}}, {'demo': True}, {'content_scope': 'youtube-title-only-v2'}]}
 
 PLATFORMS = ['facebook', 'instagram', 'x', 'youtube', 'news']
-DEFAULT_KEYWORD_VARIANTS = ['Jan Suraj Party', 'Jan Suraaj Party', 'Jan Suraj', 'Jan Suraaj',
-                            '#JanSuraj', '#JanSuraaj']
-KEYWORDS = ['Jan Suraaj Party', 'Prashant Kishore', 'PK', 'जन सुराज', 'प्रशांत किशोर', '#JanSuraaj', '#PrashantKishore']
+TRACKING_SCOPE_VERSION = 'samrat-bihar-bjp-government-v2'
+DEFAULT_KEYWORD_VARIANTS = [
+    'Samrat Chaudhary', 'BJP Bihar', 'Bihar Bharatiya Janata Party',
+    'Government of Bihar', '#SamratChoudhary', '#BJP4Bihar', '#BiharGovernment',
+]
+KEYWORDS = [
+    'Samrat Choudhary', 'Bihar BJP', 'Bharatiya Janata Party Bihar',
+    'Bihar Government', 'Bihar Govt', 'सम्राट चौधरी', 'बिहार भाजपा', 'भाजपा बिहार',
+    'बिहार सरकार', '#BiharBJP', '#SamratChaudhary', '#BiharGovt',
+    'NDA', 'NDA Bihar', 'BJP NDA', 'एनडीए',
+    '#NDA', '#NDAAlliance', '#NDABihar', '#BJPNDA', '#भाजपाएनडीए', '#एनडीए',
+]
+LEGACY_KEYWORDS = [
+    'Jan Suraj Party', 'Jan Suraaj Party', 'Jan Suraj', 'Jan Suraaj',
+    'Prashant Kishore', 'PK', 'जन सुराज', 'प्रशांत किशोर',
+    '#JanSuraj', '#JanSuraaj', '#PrashantKishore',
+]
 
 def today():
     return now().astimezone(ZoneInfo(config().reporting_timezone)).date().isoformat()
@@ -204,7 +218,14 @@ async def sync(db, client, platforms=None):
                     await db.platform_credentials.update_one({'_id': c['_id']}, {'$set': {'last_attempt_at': started}})
                     try:
                         secret = decrypt(c['encrypted_api_key'])
-                        if p == 'youtube' and c.get('search_strategy') != 'keyword-and-short-v3':
+                        scope_changed = c.get('tracking_scope_version') != TRACKING_SCOPE_VERSION
+                        if scope_changed:
+                            # A campaign retarget must not reuse the previous campaign's
+                            # ingestion cursor. Backfill all sources for the new scope.
+                            since = now() - timedelta(days=(
+                                config().youtube_initial_lookback_days if p == 'youtube' else 7
+                            ))
+                        elif p == 'youtube' and c.get('search_strategy') != 'keyword-and-short-v3':
                             since = now() - timedelta(days=config().youtube_initial_lookback_days)
                         elif p == 'news' and c.get('search_strategy') != 'entity-rss-v3':
                             since = now() - timedelta(days=7)
@@ -227,6 +248,7 @@ async def sync(db, client, platforms=None):
                                     {'$set': row, '$unset': {'description': ''}})
                             await db.posts.update_one({'platform': p, 'external_id': row['external_id']}, {'$setOnInsert': row}, upsert=True)
                         credential_update = {'last_synced_at': started, 'status': 'live', 'error': None,
+                                             'tracking_scope_version': TRACKING_SCOPE_VERSION,
                                              'encrypted_api_key': encrypt(secret)}
                         if p == 'youtube':
                             credential_update['search_strategy'] = 'keyword-and-short-v3'
@@ -283,12 +305,12 @@ async def seed(db):
         return
     rng = random.Random(20260928)
     texts = {
-        'positive': ['जन सुराज की शिक्षा पर चर्चा अच्छी लगी। अब काम होते देखना है।', 'Prashant Kishore is asking the right questions about jobs in Bihar.', 'Jan Suraaj Party ki local meeting mein achhi discussion hui.'],
-        'negative': ['Jan Suraaj Party needs a clearer jobs plan. Promises alone are not enough.', 'प्रशांत किशोर की बातों में जमीन पर काम की स्पष्ट योजना कहाँ है?', 'PK ki rally mein sawaal zyada, jawaab kam. Bihar needs specifics.'],
-        'neutral': ['Prashant Kishore addressed a public meeting today. Full discussion to follow.', 'जन सुराज की अगली बैठक रविवार को आयोजित होगी।', 'Jan Suraaj Party: a summary of today’s education policy discussion.']}
+        'positive': ['बिहार सरकार की शिक्षा पहल पर अच्छी चर्चा हुई।', 'Samrat Choudhary is asking the right questions about jobs in Bihar.', 'Bihar BJP ki local meeting mein achhi discussion hui.'],
+        'negative': ['Bihar Government needs a clearer jobs plan. Promises alone are not enough.', 'सम्राट चौधरी की बातों में जमीन पर काम की स्पष्ट योजना कहाँ है?', 'Bihar BJP ki rally mein sawaal zyada, jawaab kam.'],
+        'neutral': ['Samrat Choudhary addressed a public meeting today. Full discussion to follow.', 'बिहार भाजपा की अगली बैठक रविवार को होगी।', 'Bihar Government: a summary of today’s education policy discussion.']}
     texts['mixed'] = [
-        'Prashant Kishore raised strong education points, but his jobs plan remains weak.',
-        'Jan Suraaj campaign praised for outreach but criticised for unclear candidates.',
+        'Samrat Choudhary raised strong education points, but his jobs plan remains weak.',
+        'Bihar Government praised for outreach but criticised for slow execution.',
     ]
     docs = []
     day0 = datetime.fromisoformat(today()).date()

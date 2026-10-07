@@ -31,10 +31,17 @@ NEWS_CHANNELS = (
 )
 
 NEWS_SEARCH_QUERIES = (
-    '"Jan Suraaj" OR "Jan Suraj"',
-    '"Prashant Kishore"',
-    '"जन सुराज"',
-    '"प्रशांत किशोर"',
+    '"Samrat Choudhary" OR "Samrat Chaudhary"',
+    '"Bihar BJP" OR "BJP Bihar"',
+    '"Bihar Government" OR "Bihar Govt"',
+    '"सम्राट चौधरी" OR "बिहार भाजपा" OR "बिहार सरकार"',
+)
+
+YOUTUBE_SEARCH_TERMS = (
+    'Samrat Choudhary',
+    'Bihar BJP',
+    'Bihar Government',
+    'NDA Bihar',
 )
 
 NEWS_SOURCE_ALIASES = {
@@ -161,11 +168,10 @@ async def youtube_posts(client, secret, keywords, since):
     # per-group + short-filter approach spent about four times as many quota units.
     rows = []
     videos = {}
-    query_terms = []
-    for keyword in dict.fromkeys(k.strip() for k in keywords if k.strip()):
-        if len('|'.join(query_terms + [keyword])) > 450:
-            break
-        query_terms.append(keyword)
+    # YouTube returns an empty result set for very large OR expressions even
+    # though compact entity searches work. Use one stable discovery query;
+    # the complete editable keyword set still filters returned video titles.
+    query_terms = list(YOUTUBE_SEARCH_TERMS)
     data = await youtube_get('search', dict(
         part='snippet', type='video', order='date', maxResults=50,
         q='|'.join(query_terms), publishedAfter=since.isoformat().replace('+00:00', 'Z'),
@@ -325,18 +331,19 @@ def _actor_input(platform, keywords, since, max_items):
     """Build inputs for the fixed, tested Apify Actors."""
     since_iso = since.isoformat().replace('+00:00', 'Z')
     if platform == 'instagram':
-        # Instagram's official Actor accepts comma-separated searches. Hashtag
-        # search is the compliant public discovery mode for keyword monitoring.
+        # Direct hashtag URLs make the Instagram Scraper return post objects.
+        # Its generic `search` input returns hashtag summary objects instead.
         searches = []
         for keyword in keywords[:10]:
             tag = re.sub(r'[^\w]+', '', keyword.lstrip('#'), flags=re.UNICODE)
             if tag and tag.casefold() not in {value.casefold() for value in searches}:
                 searches.append(tag)
         return {
+            'directUrls': [
+                f'https://www.instagram.com/explore/tags/{quote(tag, safe="")}/'
+                for tag in searches
+            ],
             'resultsType': 'posts',
-            'searchType': 'hashtag',
-            'search': ','.join(searches),
-            'searchLimit': min(max_items, 50),
             'resultsLimit': max_items,
             'onlyPostsNewerThan': since_iso,
         }

@@ -35,19 +35,21 @@ def test_encryption():
     assert decrypt(ciphertext) == secret
 
 
-def test_keyword_matching_hindi_and_pk():
-    assert matches('जन सुराज पर चर्चा', ['जन सुराज'])
-    assert matches('PK ki meeting', ['PK'])
-    assert not matches('APK file download', ['PK'])
+def test_keyword_matching_hindi_and_name_variants():
+    assert matches('बिहार सरकार पर चर्चा', ['बिहार सरकार'])
+    assert matches('Samrat Choudhary ki meeting', ['Samrat Choudhary'])
+    assert not matches('Unrelated Bihar bulletin', ['Bihar BJP'])
 
 
 def test_token_only_apify_inputs_are_platform_specific():
     since = now() - timedelta(hours=2)
-    keywords = ['Jan Suraaj', 'Prashant Kishore']
+    keywords = ['Samrat Choudhary', 'Bihar BJP']
     instagram = _actor_input('instagram', keywords, since, 20)
     assert instagram['resultsType'] == 'posts'
-    assert instagram['searchType'] == 'hashtag'
-    assert instagram['search'] == 'JanSuraaj,PrashantKishore'
+    assert instagram['directUrls'] == [
+        'https://www.instagram.com/explore/tags/SamratChoudhary/',
+        'https://www.instagram.com/explore/tags/BiharBJP/',
+    ]
     assert instagram['onlyPostsNewerThan'].endswith('Z')
     assert _actor_input('x', keywords, since, 20)['searchTerms'] == keywords
 
@@ -75,7 +77,7 @@ async def test_negative_post_telegram_alert_is_idempotent(monkeypatch):
     db = AsyncMongoMockClient(tz_aware=True).test
     await db.posts.insert_one({
         'platform': 'facebook', 'external_id': 'negative-1', 'author': 'News Desk',
-        'content': 'Jan Suraaj Party plan faces criticism',
+        'content': 'Bihar Government plan faces criticism',
         'url': 'https://example.org/post/negative-1', 'published_at': now(), 'demo': False,
         'sentiment': {'label': 'negative', 'confidence': .91},
         'telegram_notification': {'status': 'pending'},
@@ -206,22 +208,22 @@ async def test_apify_actor_normalizes_and_filters_items():
         requests.append(req)
         if 'facebook-search-scraper' in str(req.url):
             return httpx.Response(200, json=[
-                {'pageName': 'Jan Suraaj', 'facebookUrl': 'https://www.facebook.com/jansuraaj'},
+                {'pageName': 'Bihar BJP', 'facebookUrl': 'https://www.facebook.com/BJP4Bihar'},
             ])
         return httpx.Response(200, json=[
-            {'postId': '42', 'text': 'Jan Suraaj Party rally update', 'time': now().isoformat(),
+            {'postId': '42', 'text': 'Bihar BJP rally update', 'time': now().isoformat(),
              'postUrl': 'https://example.org/post/42', 'pageName': 'Reporter', 'reactionCount': '12'},
             {'postId': '43', 'text': 'Unrelated post', 'createdAt': now().isoformat()},
         ])
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         rows = await apify_posts(client, 'facebook', {'api_key': 'apify-token-value'},
-            ['Jan Suraaj'], now() - timedelta(hours=1))
+            ['Bihar BJP'], now() - timedelta(hours=1))
     assert len(rows) == 1 and rows[0]['external_id'] == '42'
     assert rows[0]['engagement']['likes'] == 12 and rows[0]['source_provider'] == 'apify'
     assert requests[0].headers['Authorization'] == 'Bearer apify-token-value'
     assert '/acts/apify~facebook-search-scraper/run-sync-get-dataset-items' in str(requests[0].url)
     assert '/acts/apify~facebook-posts-scraper/run-sync-get-dataset-items' in str(requests[1].url)
-    assert json.loads(requests[1].content)['startUrls'] == [{'url': 'https://www.facebook.com/jansuraaj'}]
+    assert json.loads(requests[1].content)['startUrls'] == [{'url': 'https://www.facebook.com/BJP4Bihar'}]
 
 
 @pytest.mark.asyncio
@@ -230,13 +232,13 @@ async def test_apify_normalizes_serialized_facebook_author():
         if 'facebook-search-scraper' in str(req.url):
             return httpx.Response(200, json=[{'facebookUrl': 'https://facebook.com/jagaritbihar'}])
         return httpx.Response(200, json=[{
-            'postId': 'fb-1', 'text': 'Jan Suraaj Party teachers update',
+            'postId': 'fb-1', 'text': 'Bihar Government teachers update',
             'createdAt': now().isoformat(),
             'author': "{'id': '123', 'name': 'Jagarit Bihar', 'profilePic': 'https://example.org/long.jpg'}",
         }])
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         rows = await apify_posts(client, 'facebook', {'api_key': 'token'},
-                                 ['Jan Suraaj'], now() - timedelta(hours=1))
+                                 ['Bihar Government'], now() - timedelta(hours=1))
     assert rows[0]['author'] == 'Jagarit Bihar'
 
 
@@ -249,13 +251,13 @@ async def test_google_news_rss_input_and_output_mapping():
         captured.append(req)
         return httpx.Response(200, text=f'''<?xml version="1.0" encoding="UTF-8"?>
           <rss version="2.0"><channel><item>
-          <title>Prashant Kishore addresses Bihar rally - News18 Bihar Jharkhand</title>
+          <title>Samrat Choudhary addresses Bihar rally - News18 Bihar Jharkhand</title>
           <link>https://news.google.com/rss/articles/story</link>
           <guid>rss-story-1</guid><pubDate>{published}</pubDate>
           <source url="https://news18.com">News18 Bihar Jharkhand</source>
           </item></channel></rss>''')
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        rows = await google_news_posts(client, ['Jan Suraaj', 'Prashant Kishore'], now() - timedelta(days=1))
+        rows = await google_news_posts(client, ['Samrat Choudhary', 'Bihar BJP'], now() - timedelta(days=1))
     assert len(captured) == len(NEWS_SEARCH_QUERIES)
     assert all(req.url.host == 'news.google.com' for req in captured)
     assert all(req.url.params['ceid'] == 'IN:hi' for req in captured)
@@ -263,7 +265,7 @@ async def test_google_news_rss_input_and_output_mapping():
                for req in captured)
     assert rows[0]['author'] == 'News18 Bihar Jharkhand'
     assert rows[0]['url'] == 'https://news.google.com/rss/articles/story'
-    assert rows[0]['content'] == 'Prashant Kishore addresses Bihar rally'
+    assert rows[0]['content'] == 'Samrat Choudhary addresses Bihar rally'
     assert rows[0]['source_provider'] == 'google-news-rss'
 
 

@@ -37,14 +37,15 @@ def preprocess(text: str) -> str:
 
 
 _TARGET_PATTERN = re.compile(
-    r'jan\s*sura(?:j|aj)|\u091c\u0928\s*\u0938\u0941\u0930\u093e\u091c|'
-    r'prashant\s*kishor(?:e)?|\u092a\u094d\u0930\u0936\u093e\u0902\u0924\s*'
-    r'\u0915\u093f\u0936\u094b\u0930|\u092a\u0940\u0915\u0947|(?<![a-z])pk(?![a-z])', re.IGNORECASE,
+    r'samrat\s*(?:choudhary|chaudhary)|\u0938\u092e\u094d\u0930\u093e\u091f\s*\u091a\u094c\u0927\u0930\u0940|'
+    r'(?:bihar\s*bjp|bjp\s*bihar|bjp4bihar|(?:bihar\s+)?bharatiya\s+janata\s+party(?:\s+bihar)?)|'
+    r'(?:\u092c\u093f\u0939\u093e\u0930\s*\u092d\u093e\u091c\u092a\u093e|\u092d\u093e\u091c\u092a\u093e\s*\u092c\u093f\u0939\u093e\u0930)|'
+    r'(?:bihar\s*(?:government|govt)|government\s+of\s+bihar|\u092c\u093f\u0939\u093e\u0930\s*\u0938\u0930\u0915\u093e\u0930)', re.IGNORECASE,
 )
 _TARGET_HASHTAG_PATTERN = re.compile(
-    r'#(?:jan_?sura(?:j|aj)|prashant_?kishor(?:e)?|pk|\u092a\u0940\u0915\u0947|'
-    r'\u091c\u0928\u0938\u0941\u0930\u093e\u091c|'
-    r'\u092a\u094d\u0930\u0936\u093e\u0902\u0924\u0915\u093f\u0936\u094b\u0930)', re.IGNORECASE,
+    r'#(?:samrat_?(?:choudhary|chaudhary)|bihar_?bjp|bjp4bihar|'
+    r'bihar_?(?:government|govt)|\u0938\u092e\u094d\u0930\u093e\u091f\u091a\u094c\u0927\u0930\u0940|'
+    r'\u092c\u093f\u0939\u093e\u0930\u092d\u093e\u091c\u092a\u093e|\u092c\u093f\u0939\u093e\u0930\u0938\u0930\u0915\u093e\u0930)', re.IGNORECASE,
 )
 _ATTRIBUTION_RISK_PATTERN = re.compile(
     r'\b(?:said|says|asks|questioned|blamed|accused|attacked|criticised|criticized|'
@@ -53,8 +54,8 @@ _ATTRIBUTION_RISK_PATTERN = re.compile(
     r'\u092d\u0921\u093c\u0915\u0947|\u092d\u0921\u0915\u0947|\u0938\u0935\u093e\u0932|'
     r'\u0939\u092e\u0932\u093e|\u0928\u093f\u0936\u093e\u0928\u093e|\u0935\u093f\u0930\u094b\u0927|'
     r'\u0916\u093f\u0932\u093e\u092b|\u091a\u0941\u092a\s+\u0915\u094d\u092f\u094b\u0902|'
-    r'\b(?:bjp|rjd|jdu|jd\(u\)|congress|nda|modi|nitish|lalu|tejashwi)\b|'
-    r'\u092d\u093e\u091c\u092a\u093e|\u0915\u093e\u0902\u0917\u094d\u0930\u0947\u0938|'
+    r'\b(?:rjd|jdu|jd\(u\)|congress|jan\s*suraaj|jan\s*suraj|prashant\s*kishor(?:e)?|pk|modi|nitish|lalu|tejashwi)\b|'
+    r'\u091c\u0928\s*\u0938\u0941\u0930\u093e\u091c|\u092a\u094d\u0930\u0936\u093e\u0902\u0924\s*\u0915\u093f\u0936\u094b\u0930|\u0915\u093e\u0902\u0917\u094d\u0930\u0947\u0938|'
     r'\u092e\u094b\u0926\u0940|\u0936\u093e\u0939|\u0928\u0940\u0924\u0940\u0936|'
     r'\u0932\u093e\u0932\u0942|\u0924\u0947\u091c\u0938\u094d\u0935\u0940|\u0905\u0936\u094b\u0915\s*\u091a\u094c\u0927\u0930\u0940',
     re.IGNORECASE,
@@ -78,14 +79,16 @@ def detect_language(text: str) -> Literal['hi', 'en', 'hinglish']:
 
 def detect_targets(text: str) -> list[str]:
     targets = []
-    if re.search(r'jan\s*sura(?:j|aj)|\u091c\u0928\s*\u0938\u0941\u0930\u093e\u091c|'
-                 r'#jan_?sura(?:j|aj)|#\u091c\u0928\u0938\u0941\u0930\u093e\u091c', text, re.I):
-        targets.append('jan_suraaj')
-    if re.search(r'prashant\s*kishor(?:e)?|\u092a\u094d\u0930\u0936\u093e\u0902\u0924\s*'
-                 r'\u0915\u093f\u0936\u094b\u0930|#prashant_?kishor(?:e)?|'
-                 r'#\u092a\u094d\u0930\u0936\u093e\u0902\u0924\u0915\u093f\u0936\u094b\u0930|'
-                 r'\u092a\u0940\u0915\u0947|(?<![a-z])pk(?![a-z])', text, re.I):
-        targets.append('prashant_kishore')
+    if re.search(r'samrat\s*(?:choudhary|chaudhary)|\u0938\u092e\u094d\u0930\u093e\u091f\s*\u091a\u094c\u0927\u0930\u0940|'
+                 r'#samrat_?(?:choudhary|chaudhary)|#\u0938\u092e\u094d\u0930\u093e\u091f\u091a\u094c\u0927\u0930\u0940', text, re.I):
+        targets.append('samrat_choudhary')
+    if re.search(r'bihar\s*bjp|bjp\s*bihar|bjp4bihar|(?:bihar\s+)?bharatiya\s+janata\s+party(?:\s+bihar)?|'
+                 r'\u092c\u093f\u0939\u093e\u0930\s*\u092d\u093e\u091c\u092a\u093e|\u092d\u093e\u091c\u092a\u093e\s*\u092c\u093f\u0939\u093e\u0930|'
+                 r'#bihar_?bjp|#bjp4bihar|#\u092c\u093f\u0939\u093e\u0930\u092d\u093e\u091c\u092a\u093e', text, re.I):
+        targets.append('bihar_bjp')
+    if re.search(r'bihar\s*(?:government|govt)|government\s+of\s+bihar|\u092c\u093f\u0939\u093e\u0930\s*\u0938\u0930\u0915\u093e\u0930|'
+                 r'#bihar_?(?:government|govt)|#\u092c\u093f\u0939\u093e\u0930\u0938\u0930\u0915\u093e\u0930', text, re.I):
+        targets.append('bihar_government')
     return targets
 
 
@@ -93,7 +96,7 @@ def apply_target_context(text: str, result: Result, verifier_gate: float = 0.80)
     """Route target-ambiguous overall-tone results to Gemini.
 
     Cardiff predicts overall tweet tone. Bad-news words must not become criticism
-    of Jan Suraaj merely because a campaign hashtag is present.
+    of a tracked Bihar political target merely because its hashtag is present.
     """
     result.language = detect_language(text)
     result.targets = detect_targets(text)

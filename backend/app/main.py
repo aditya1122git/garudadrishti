@@ -23,7 +23,7 @@ from .config import (config, APIFY_SYNC_INTERVAL_HOURS, DEFAULT_AUTOMATION_START
 from .connectors import _author_name
 from .sentiment import classifier_status
 from .models import DOCUMENTS, now, Platform, Label
-from .services import POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, PLATFORMS, today, bounds, settings, encrypt, audit, statuses, seed, sync, scheduled_sync, sync_running
+from .services import POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, LEGACY_KEYWORDS, PLATFORMS, today, bounds, settings, encrypt, audit, statuses, seed, sync, scheduled_sync, sync_running
 from .reporting import build_sentiment_pdf
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,10 @@ async def lifespan(app):
         raise RuntimeError('No users exist. Set BOOTSTRAP_EMAIL and BOOTSTRAP_PASSWORD for the first startup only.')
     for term in dict.fromkeys(KEYWORDS + DEFAULT_KEYWORD_VARIANTS):
         await db.tracked_keywords.update_one({'keyword': term}, {'$setOnInsert': {'keyword': term, 'is_active': True}}, upsert=True)
+    # Retire defaults from the previous monitoring campaign.
+    await db.tracked_keywords.update_many(
+        {'keyword': {'$in': LEGACY_KEYWORDS}}, {'$set': {'is_active': False}},
+    )
     await db.settings.update_one({'_id': 'main'}, {
         '$set': {'threshold': 500},
         '$setOnInsert': {

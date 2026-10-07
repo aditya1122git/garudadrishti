@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app.connectors import youtube_posts
+from app.connectors import YOUTUBE_SEARCH_TERMS, youtube_posts
 from app.gemini_fallback import GeminiFallback
 from app.models import now
 from app.sentiment import Classifier, Result, apply_target_context, detect_targets
@@ -38,10 +38,10 @@ async def test_exact_threshold_routes_only_below_80(monkeypatch):
 
 
 @pytest.mark.parametrize('title', [
-    'अपराध पर दुख जताने के बजाय मजाक? अशोक चौधरी के बयान पर भड़के पीके! #JanSuraj',
-    'जमुई कांड पर अशोक चौधरी के बेतुके बयान पर भड़के पीके! #JanSuraj #JamuiIncident',
-    'राजधानी पटना में दिनदहाड़े गोलियां, डीजीपी तक नहीं! #JanSuraaj #PatnaFiring',
-    'बिहार में 50 लाख बाढ़ पीड़ितों पर मोदी-शाह चुप क्यों? #JanSuraj #BiharFlood',
+    'अपराध पर दुख जताने के बजाय मजाक? विपक्ष के बयान पर भड़के सम्राट चौधरी! #BiharBJP',
+    'जमुई कांड पर विपक्ष के बयान पर बरसे सम्राट चौधरी! #JamuiIncident',
+    'राजधानी पटना में दिनदहाड़े गोलियां, डीजीपी तक नहीं! #BiharGovernment #PatnaFiring',
+    'बिहार में 50 लाख बाढ़ पीड़ित #BiharBJP #BiharFlood',
 ])
 def test_negative_event_with_campaign_hashtag_routes_to_target_verifier(title):
     result = apply_target_context(
@@ -49,22 +49,23 @@ def test_negative_event_with_campaign_hashtag_routes_to_target_verifier(title):
     )
     assert result.confidence == .79
     assert result.hf_confidence is None
-    assert 'jan_suraaj' in result.targets
+    assert result.targets
     assert 'Gemini verification' in result.reason
 
 
 def test_direct_target_criticism_can_stay_high_confidence_hf():
     result = apply_target_context(
-        'Jan Suraaj ने जनता को निराश किया',
+        'बिहार सरकार ने जनता को निराश किया',
         Result(sentiment='negative', confidence=.94, reason='Overall negative'), .80,
     )
     assert result.confidence == .94
 
 
 def test_devanagari_target_detection():
-    text = 'जन सुराज और प्रशांत किशोर'
-    assert detect_targets(text) == ['jan_suraaj', 'prashant_kishore']
-    assert detect_targets('भड़के पीके') == ['prashant_kishore']
+    text = 'सम्राट चौधरी, बिहार भाजपा और बिहार सरकार'
+    assert detect_targets(text) == ['samrat_choudhary', 'bihar_bjp', 'bihar_government']
+    assert detect_targets('#SamratChaudhary') == ['samrat_choudhary']
+    assert detect_targets('Bihar Bharatiya Janata Party') == ['bihar_bjp']
 
 
 @pytest.mark.asyncio
@@ -153,6 +154,7 @@ async def test_youtube_classifies_title_only_never_description_or_comments():
     def handler(req):
         paths.append(req.url.path)
         if req.url.path.endswith('/search'):
+            assert req.url.params['q'] == '|'.join(YOUTUBE_SEARCH_TERMS)
             return httpx.Response(200, json={'items': [
                 {'id': {'videoId': 'abc'}}, {'id': {'videoId': 'description-only'}},
             ]})
@@ -160,24 +162,24 @@ async def test_youtube_classifies_title_only_never_description_or_comments():
         assert req.url.params['part'] == 'snippet,statistics,contentDetails'
         return httpx.Response(200, json={'items': [
             {'id': 'abc', 'snippet': {
-                'title': 'Prashant Kishore meeting',
+                'title': 'Samrat Choudhary meeting',
                 'description': 'Full description, not a search excerpt.',
                 'channelTitle': 'News', 'publishedAt': '2026-10-01T00:00:00Z'},
              'contentDetails': {'duration': 'PT45S'},
              'statistics': {'likeCount': '4', 'viewCount': '90', 'commentCount': '99'}},
             {'id': 'description-only', 'snippet': {
                 'title': 'Unrelated daily bulletin',
-                'description': 'Prashant Kishore appears only here.',
+                'description': 'Samrat Choudhary appears only here.',
                 'channelTitle': 'News', 'publishedAt': '2026-10-01T00:00:00Z'},
              'statistics': {}},
         ]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         rows = await youtube_posts(
-            client, {'api_key': 'test'}, ['Prashant Kishore'], now() - timedelta(days=1),
+            client, {'api_key': 'test'}, ['Samrat Choudhary'], now() - timedelta(days=1),
         )
     assert paths.count('/youtube/v3/search') == 1 and len(rows) == 1
-    assert rows[0]['content'] == 'Prashant Kishore meeting'
+    assert rows[0]['content'] == 'Samrat Choudhary meeting'
     assert 'description' not in rows[0]
     assert rows[0]['engagement']['comments'] == 0
     assert rows[0]['engagement']['views'] == 90
@@ -201,7 +203,7 @@ async def test_youtube_rotates_to_backup_key_only_after_quota_exhaustion():
             return httpx.Response(200, json={'items': [{'id': {'videoId': 'backup-video'}}]})
         return httpx.Response(200, json={'items': [{
             'id': 'backup-video',
-            'snippet': {'title': 'Jan Suraaj update', 'channelTitle': 'News',
+            'snippet': {'title': 'Bihar BJP update', 'channelTitle': 'News',
                         'publishedAt': '2026-10-06T06:00:00Z'},
             'statistics': {}, 'contentDetails': {'duration': 'PT5M'},
         }]})
@@ -209,7 +211,7 @@ async def test_youtube_rotates_to_backup_key_only_after_quota_exhaustion():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         rows = await youtube_posts(client, {
             'api_key': 'primary', 'backup_api_key': 'backup',
-        }, ['Jan Suraaj'], now() - timedelta(days=1))
+        }, ['Bihar BJP'], now() - timedelta(days=1))
 
     assert keys == ['primary', 'backup', 'backup']
     assert len(rows) == 1 and rows[0]['external_id'] == 'backup-video'

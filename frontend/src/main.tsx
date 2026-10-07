@@ -107,6 +107,23 @@ const names: Record<string, string> = {
   youtube: "YouTube",
   news: "News",
 };
+
+function sourceStatus(source: Source) {
+  if (source.status === "disconnected") {
+    return { label: "Not connected", detail: "Excluded from totals" };
+  }
+
+  if (source.status === "unavailable") {
+    const error = source.error || "";
+    const exhausted = /exhaust|quota|credit|limit|usage|fund|payment/i.test(error);
+    return {
+      label: exhausted ? "Exhausted" : "Data unavailable",
+      detail: error || "The source is temporarily unavailable",
+    };
+  }
+
+  return { label: "Connected", detail: "Includes classified mentions" };
+}
 const colors = {
   positive: "#2f9278",
   negative: "#ce514e",
@@ -255,11 +272,11 @@ function App() {
           <div className="login-intro">
             <div className="login-logo">
               <Eye />
-              <span>JanNetra</span>
+              <span>GarudaDrishti</span>
             </div>
             <p>Political conversations, clearly understood.</p>
           </div>
-          <h1>Log in to JanNetra</h1>
+          <h1>Log in to GarudaDrishti</h1>
           <input className="form-control"
             aria-label="Email address"
             placeholder="Email address"
@@ -400,10 +417,15 @@ function Workspace({
       {loadingTasks > 0 && <GlobalLoader message={loadingMessage} />}
       <header className={mobile ? "app-navbar open" : "app-navbar"}>
         <div className="navbar-inner">
-          <div className="navbar-brand">
+          <button
+            type="button"
+            className="navbar-brand"
+            aria-label="Go to Overview"
+            onClick={() => navigate("overview")}
+          >
             <span className="navbar-logo"><Eye size={22} /></span>
-            <strong>JanNetra</strong>
-          </div>
+            <strong>GarudaDrishti</strong>
+          </button>
           <button
             className="mobile-toggle"
             aria-label="Toggle navigation"
@@ -450,7 +472,7 @@ function Workspace({
         <div className="content">
           <div className="page-heading">
             <div>
-              <p className="eyebrow">BIHAR / SOCIAL INTELLIGENCE</p>
+              <p className="eyebrow">CM SOCIAL INTELLIGENCE</p>
               <h1>
                 {view === "overview"
                   ? "Sentiment overview"
@@ -880,39 +902,37 @@ function Workspace({
                                   </span>
                                 </div>
                                 <div className="source-grid">
-                                  {data.sources.map((s) => (
-                                    <button
-                                      key={s.platform}
-                                      className="source-item"
-                                      onClick={() => setPlatform(s.platform)}
-                                    >
-                                      <span
-                                        className={
-                                          "platform-mark " + s.platform
-                                        }
+                                  {data.sources.map((s) => {
+                                    const state = sourceStatus(s);
+                                    return (
+                                      <button
+                                        key={s.platform}
+                                        className="source-item"
+                                        onClick={() => setPlatform(s.platform)}
                                       >
-                                        <PlatformIcon platform={s.platform} />
-                                      </span>
-                                      <strong>{names[s.platform]}</strong>
-                                      <span
-                                        className={
-                                          s.status === "disconnected"
-                                            ? "muted"
-                                            : "source-state"
-                                        }
-                                      >
-                                        {s.status === "unavailable"
-                                          ? "Data unavailable"
-                                          : s.source}
-                                      </span>
-                                      <small>
-                                        {s.status === "disconnected"
-                                          ? "Excluded from totals"
-                                          : s.error ||
-                                            "Includes classified mentions"}
-                                      </small>
-                                    </button>
-                                  ))}
+                                        <span
+                                          className={
+                                            "platform-mark " + s.platform
+                                          }
+                                        >
+                                          <PlatformIcon platform={s.platform} />
+                                        </span>
+                                        <strong>{names[s.platform]}</strong>
+                                        <span
+                                          className={
+                                            s.status === "disconnected"
+                                              ? "muted"
+                                              : s.status === "unavailable"
+                                                ? "source-error"
+                                                : "source-state"
+                                          }
+                                        >
+                                          {state.label}
+                                        </span>
+                                        <small>{state.detail}</small>
+                                      </button>
+                                    );
+                                  })}
                                 </div>
                               </section>
                               <section className="panel heat-panel">
@@ -981,7 +1001,7 @@ function Workspace({
           )}
           <footer>
             <span>
-              <Eye size={14} /> JanNetra ·{" "}
+              <Eye size={14} /> GarudaDrishti ·{" "}
               Public conversation monitoring
             </span>
             <span>
@@ -1372,7 +1392,7 @@ function ReportModal({ close }: { close: () => void }) {
             const url = URL.createObjectURL(await response.blob());
             const a = document.createElement("a");
             a.href = url;
-            a.download = `jannetra-${period}-${sentiment}.${format}`;
+            a.download = `garudadrishti-${period}-${sentiment}.${format}`;
             a.click();
             setTimeout(() => URL.revokeObjectURL(url), 1000);
             close();
@@ -1629,8 +1649,7 @@ function SettingsPanel({
     [editing, setEditing] = useState(false),
     [message, setMessage] = useState(""),
     [error, setError] = useState(""),
-    [saving, setSaving] = useState(false),
-    [credential, setCredential] = useState<any>(null);
+    [saving, setSaving] = useState(false);
   useEffect(() => {
     const finishLoading = beginLoading("Loading workspace settings…");
     json("/settings")
@@ -1751,100 +1770,6 @@ function SettingsPanel({
           ) : null}
         </div>
       </form>
-      <section className="panel settings-section connections">
-        <div className="panel-title">
-          <h2>API connections</h2>
-          <span>Secrets are encrypted and never returned</span>
-        </div>
-        {Object.entries(names).map(
-          ([key, name]) => {
-            const src = prefs.sources.find((s: Source) => s.platform === key);
-            const c = prefs.credentials.find((c: any) => c.platform === key);
-            return (
-              <div className="connection" key={key}>
-                <div>
-                  <strong>{name}</strong>
-                  <p>
-                    {key === "youtube"
-                      ? "Official Data API v3 - quota-aware schedule"
-                      : key === "news"
-                        ? "Google News RSS - automatic, no API key required"
-                        : "Apify Actor - configured source monitoring"}
-                  </p>
-                </div>
-                <span>
-                  {src?.source ||
-                    c?.status ||
-                    "Not connected"}
-                </span>
-                <button
-                  disabled={!admin || key === "news"}
-                  onClick={() =>
-                    setCredential({
-                      platform: key,
-                      mode: key === "youtube" ? "official" : "apify",
-                      api_key: "",
-                    })
-                  }
-                >
-                  {key === "news" ? "Automatic" : "Configure"}
-                </button>
-              </div>
-            );
-          },
-        )}
-      </section>
-      <section className="panel settings-section connections">
-        <div className="panel-title"><h2>Sentiment classifier</h2><span>Hugging Face + Gemini verifier</span></div>
-        <strong>{prefs.model}</strong>
-        <p>Status: {prefs.classifier?.status || "pending"}</p>
-        <p>YouTube uses video titles only. Hugging Face runs first; results below {Math.round((prefs.classifier?.threshold ?? 0.80) * 100)}% and titles with ambiguous sentiment targets are verified by Gemini.</p>
-        <p>Gemini verifier: {prefs.classifier?.fallback_configured ? `configured (${prefs.classifier?.fallback_model || "server model"})` : "key missing - low-confidence items remain pending"}. Gemini resolves whether negative language is actually directed at Jan Suraaj or Prashant Kishore, including sarcasm.</p>
-        {prefs.classifier?.error && <p className="error">{prefs.classifier.error}</p>}
-      </section>
-      {credential && (
-        <Modal
-          title={"Configure " + (names[credential.platform] || "Platform")}
-          close={() => setCredential(null)}
-        >
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              const finishLoading = beginLoading("Saving API connection…");
-              setError("");
-              try {
-                await json("/credentials", {
-                  method: "PUT",
-                  body: JSON.stringify(credential),
-                });
-                setCredential(null);
-                onSaved();
-                setMessage("Connection saved. Run Refresh to verify access.");
-              } catch (e) {
-                setError((e as Error).message);
-              } finally {
-                finishLoading();
-              }
-            }}
-          >
-            <label>
-              {credential.platform === "youtube" ? "YouTube API key" : "Apify API token"}
-              <input className="form-control"
-                type="password"
-                autoComplete="new-password"
-                required
-                minLength={10}
-                value={credential.api_key}
-                onChange={(e) =>
-                  setCredential({ ...credential, api_key: e.target.value })
-                }
-              />
-            </label>
-            {error && <p className="error">{error}</p>}
-            <button className="btn btn-primary primary">Save encrypted credential</button>
-          </form>
-        </Modal>
-      )}
     </>
   );
 }
