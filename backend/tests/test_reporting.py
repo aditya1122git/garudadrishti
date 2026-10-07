@@ -55,6 +55,10 @@ def test_pdf_lists_filtered_posts_by_platform_with_clickable_links_and_poppins()
     }
     assert 'Facebook negative posts' in text
     assert 'Youtube negative posts' in text
+    assert 'GarudaDrishti' in text
+    assert 'JanNetra' not in text
+    assert reader.metadata.title == 'GarudaDrishti Daily Sentiment Report'
+    assert reader.metadata.author == 'GarudaDrishti'
     assert 'A critical Facebook post' in text
     assert 'A critical YouTube title' in text
     assert links == {post['url'] for post in posts}

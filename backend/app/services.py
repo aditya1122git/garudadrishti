@@ -3,6 +3,7 @@ import json
 import random
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from html import escape as html_escape
 from zoneinfo import ZoneInfo
 from cryptography.fernet import Fernet
 from pymongo.errors import DuplicateKeyError
@@ -26,12 +27,6 @@ KEYWORDS = [
     'NDA', 'NDA Bihar', 'BJP NDA', 'एनडीए',
     '#NDA', '#NDAAlliance', '#NDABihar', '#BJPNDA', '#भाजपाएनडीए', '#एनडीए',
 ]
-LEGACY_KEYWORDS = [
-    'Jan Suraj Party', 'Jan Suraaj Party', 'Jan Suraj', 'Jan Suraaj',
-    'Prashant Kishore', 'PK', 'जन सुराज', 'प्रशांत किशोर',
-    '#JanSuraj', '#JanSuraaj', '#PrashantKishore',
-]
-
 def today():
     return now().astimezone(ZoneInfo(config().reporting_timezone)).date().isoformat()
 
@@ -127,6 +122,17 @@ async def create_alert(db, day):
     except DuplicateKeyError:
         pass
 
+
+def _telegram_link_label(platform: object) -> str:
+    key = str(platform or '').strip().lower()
+    return {
+        'facebook': 'View on Facebook',
+        'instagram': 'View on Instagram',
+        'x': 'View on X',
+        'youtube': 'View on YouTube',
+        'news': 'View on News',
+    }.get(key, 'View original post')
+
 async def notify_negative_posts(db, client):
     """Send one idempotent Telegram message for every newly classified negative post."""
     c = config()
@@ -164,16 +170,19 @@ async def notify_negative_posts(db, client):
         sentiment = post_row.get('sentiment') or {}
         confidence = round(float(sentiment.get('confidence', 0)) * 100)
         content = ' '.join(str(post_row.get('content') or '').split())[:800]
-        message = (f'🚨 JanNetra negative post\n\n'
-                   f'Platform: {str(post_row.get("platform", "unknown")).title()}\n'
-                   f'Author: {post_row.get("author") or "Unknown"}\n'
-                   f'Confidence: {confidence}%\n\n'
-                   f'{content}\n\nOpen post: {url}')
+        platform = str(post_row.get('platform') or 'unknown')
+        link_label = _telegram_link_label(platform)
+        message = (f'<b>🚨 GarudaDrishti negative post</b>\n\n'
+                   f'<b>Platform:</b> {html_escape(platform.title())}\n'
+                   f'<b>Author:</b> {html_escape(str(post_row.get("author") or "Unknown"))}\n'
+                   f'<b>Confidence:</b> {confidence}%\n\n'
+                   f'{html_escape(content)}\n\n'
+                   f'<a href="{html_escape(url, quote=True)}">{link_label}</a>')
         try:
             response = await request(client, 'POST',
                 f'https://api.telegram.org/bot{c.telegram_bot_token}/sendMessage',
                 json={'chat_id': c.telegram_chat_id, 'text': message,
-                      'disable_web_page_preview': False})
+                      'parse_mode': 'HTML', 'disable_web_page_preview': True})
             if not isinstance(response, dict) or not response.get('ok'):
                 raise RuntimeError('Telegram rejected the message')
             await db.posts.update_one({'_id': post_row['_id']}, {

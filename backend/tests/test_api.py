@@ -69,7 +69,7 @@ def test_viewer_cannot_mutate(client, auth):
     viewer = {'Authorization': 'Bearer ' + login['access_token']}
     assert client.get('/api/overview', headers=viewer).status_code == 200
     assert client.post('/api/sync', headers=viewer).status_code == 403
-    assert client.put('/api/settings', headers=viewer, json={'threshold': 10, 'keywords': ['PK']}).status_code == 403
+    assert client.put('/api/settings', headers=viewer, json={'threshold': 10, 'keywords': ['Samrat Choudhary']}).status_code == 403
 
 
 def test_admin_sync_is_accepted_as_background_work(client, auth):

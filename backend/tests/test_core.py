@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
 from app.config import Config
 from app.models import now
-from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window
+from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window, _telegram_link_label
 from app.sentiment import Classifier
 from app.connectors import NEWS_CHANNELS, NEWS_SEARCH_QUERIES, matches, apify_posts, google_news_posts, _actor_input, _approved_news_source, ProviderError, request
 
@@ -19,6 +19,12 @@ def test_timezone_boundary():
     start, end = bounds('2026-09-28')
     assert start.isoformat() == '2026-09-27T18:30:00+00:00'
     assert end - start == timedelta(days=1)
+
+
+def test_telegram_link_labels_are_platform_specific():
+    assert _telegram_link_label('x') == 'View on X'
+    assert _telegram_link_label('youtube') == 'View on YouTube'
+    assert _telegram_link_label('instagram') == 'View on Instagram'
 
 
 def test_bootstrap_credentials_are_optional_for_existing_database():
@@ -103,6 +109,11 @@ async def test_negative_post_telegram_alert_is_idempotent(monkeypatch):
     assert len(requests) == 1
     payload = json.loads(requests[0].content)
     assert payload['chat_id'] == '-1001234567890'
+    assert payload['parse_mode'] == 'HTML'
+    assert payload['disable_web_page_preview'] is True
+    assert 'GarudaDrishti negative post' in payload['text']
+    assert '>View on Facebook</a>' in payload['text']
+    assert 'Open post:' not in payload['text']
     assert 'https://example.org/post/negative-1' in payload['text']
 
 
