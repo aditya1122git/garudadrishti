@@ -1886,9 +1886,13 @@ body {
   color: var(--brand-orange);
   font-size: 22px;
   letter-spacing: -0.7px;
+  -webkit-tap-highlight-color: transparent;
 }
-.navbar-brand:hover {
+.navbar-brand:hover,
+.navbar-brand:active,
+.navbar-brand:focus-visible {
   background: transparent;
+  color: var(--brand-orange);
 }
 .navbar-brand strong {
   font-weight: 700;
@@ -1899,6 +1903,12 @@ body {
   border-radius: 50%;
   display: grid;
   place-items: center;
+  background: var(--brand-orange);
+  color: #fff;
+}
+.navbar-brand:hover .navbar-logo,
+.navbar-brand:active .navbar-logo,
+.navbar-brand:focus-visible .navbar-logo {
   background: var(--brand-orange);
   color: #fff;
 }

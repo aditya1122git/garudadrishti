@@ -41,7 +41,6 @@ def test_pdf_lists_filtered_posts_by_platform_with_clickable_links_and_poppins()
         }],
         sentiment_posts=posts,
         sentiment_filter='negative',
-        source_rows=[{'platform': 'facebook', 'source': 'Apify Actor', 'status': 'live'}],
     )
 
     stream.seek(0)
@@ -57,6 +56,8 @@ def test_pdf_lists_filtered_posts_by_platform_with_clickable_links_and_poppins()
     assert 'Youtube negative posts' in text
     assert 'GarudaDrishti' in text
     assert 'JanNetra' not in text
+    assert 'Data source status' not in text
+    assert 'Apify Actor' not in text
     assert reader.metadata.title == 'GarudaDrishti Daily Sentiment Report'
     assert reader.metadata.author == 'GarudaDrishti'
     assert 'A critical Facebook post' in text
