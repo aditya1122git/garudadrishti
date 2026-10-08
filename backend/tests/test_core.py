@@ -321,19 +321,19 @@ async def test_google_news_rss_input_and_output_mapping():
 
 def test_reddit_actor_input_and_post_mapping():
     since = now() - timedelta(hours=6)
-    payload = _actor_input('reddit', ['Samrat Choudhary', 'Bihar BJP'], since, 20)
-    assert payload['searches'] == ['Samrat Choudhary', 'Bihar BJP']
-    assert payload['searchPosts'] is True and payload['searchComments'] is False
-    assert payload['skipComments'] is True and payload['includeNSFW'] is False
-    assert payload['sort'] == 'new' and payload['time'] == 'day'
-    assert payload['maxItems'] == payload['maxPostCount'] == 20
+    payload = _actor_input('reddit', ['Samrat Choudhary', 'Bihar BJP'], since, 10)
+    assert payload['queries'] == ['Samrat Choudhary', 'Bihar BJP']
+    assert payload['scrapeComments'] is False and payload['includeNsfw'] is False
+    assert payload['strictSearch'] is True and payload['strictTokenFilter'] is False
+    assert payload['sort'] == 'new' and payload['timeframe'] == 'day'
+    assert payload['maxPosts'] == 5
 
     row = _apify_item('reddit', {
         'id': 't3_reddit1', 'dataType': 'post',
         'title': 'Samrat Choudhary announces a Bihar development programme',
         'body': 'The Bihar BJP discussed the programme today.',
-        'username': 'bihar_observer', 'upVotes': 42, 'numberOfComments': 7,
-        'createdAt': now().isoformat(),
+        'author': 'bihar_observer', 'score': 42, 'num_comments': 7,
+        'created_utc': now().timestamp(),
         'url': 'https://www.reddit.com/r/bihar/comments/reddit1/example/',
     }, ['Samrat Choudhary', 'Bihar BJP'], since)
     assert row['platform'] == 'reddit' and row['external_id'] == 't3_reddit1'

@@ -1123,6 +1123,9 @@ function Feed({
     [posts, setPosts] = useState<{ items: Post[]; total: number } | null>(null),
     [loading, setLoading] = useState(true),
     [error, setError] = useState("");
+  const [expandedPosts, setExpandedPosts] = useState<Set<string>>(
+    () => new Set(),
+  );
   useEffect(() => {
     const t = setTimeout(() => setTerm(q), 300);
     return () => clearTimeout(t);
@@ -1133,6 +1136,10 @@ function Feed({
     return () => window.removeEventListener("filter-day", fn);
   }, []);
   useEffect(() => setPage(1), [platform, term, sentiment, sort, day]);
+  useEffect(
+    () => setExpandedPosts(new Set()),
+    [platform, term, sentiment, sort, page, day],
+  );
   useEffect(() => {
     let active = true;
     const finishLoading = beginLoading("Loading conversations…");
@@ -1225,7 +1232,11 @@ function Feed({
             <span>INTERACTIONS</span>
             <span>POSTED · IST</span>
           </div>
-          {posts?.items.slice(0, compact ? 4 : 20).map((p) => (
+          {posts?.items.slice(0, compact ? 4 : 20).map((p) => {
+            const redditExpandable =
+              p.platform === "reddit" && p.content.length > 240;
+            const redditExpanded = expandedPosts.has(p._id);
+            return (
             <article className="post-row" key={p._id}>
               <div>
                 <div className="post-author">
@@ -1237,12 +1248,44 @@ function Feed({
                     {names[p.platform]}
                   </span>
                 </div>
-                <p>{p.content}</p>
-                {p.url && /^https:\/\//.test(p.url) && (
-                  <a href={p.url} target="_blank" rel="noreferrer">
-                    Open original
-                    <ArrowUpRight size={12} />
-                  </a>
+                <p
+                  className={
+                    redditExpandable && !redditExpanded
+                      ? "reddit-post-content compact"
+                      : p.platform === "reddit"
+                        ? "reddit-post-content"
+                        : undefined
+                  }
+                >
+                  {p.content}
+                </p>
+                {(redditExpandable ||
+                  (p.url && /^https:\/\//.test(p.url))) && (
+                  <div className="post-actions">
+                    {p.url && /^https:\/\//.test(p.url) && (
+                      <a href={p.url} target="_blank" rel="noreferrer">
+                        Open original
+                        <ArrowUpRight size={12} />
+                      </a>
+                    )}
+                    {redditExpandable && (
+                      <button
+                        type="button"
+                        className="reddit-more"
+                        aria-expanded={redditExpanded}
+                        onClick={() =>
+                          setExpandedPosts((current) => {
+                            const next = new Set(current);
+                            if (next.has(p._id)) next.delete(p._id);
+                            else next.add(p._id);
+                            return next;
+                          })
+                        }
+                      >
+                        {redditExpanded ? "Show less" : "More"}
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
               <div>
@@ -1283,7 +1326,8 @@ function Feed({
                 </small>
               </div>
             </article>
-          ))}
+            );
+          })}
         </div>
       )}
       {!compact && posts && (

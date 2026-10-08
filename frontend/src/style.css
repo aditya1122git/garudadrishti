@@ -901,6 +901,36 @@ main {
   margin-top: 7px;
   line-height: 1.6;
 }
+.reddit-post-content.compact {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.post-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+.reddit-more {
+  display: inline-flex;
+  border: 0;
+  padding: 0;
+  margin-top: 4px;
+  background: transparent;
+  color: #d84a00;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.4;
+  margin-left: auto;
+}
+.reddit-more:hover,
+.reddit-more:focus-visible {
+  color: #ff6714;
+  text-decoration: underline;
+}
 .post-author {
   display: flex;
   align-items: center;

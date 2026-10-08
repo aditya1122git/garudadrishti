@@ -66,6 +66,17 @@ X_SEARCH_GROUPS = (
 X_MATCH_ALIASES = ('CM Samrat', '#CMSamrat', '@samrat4bjp', '@BJP4Bihar', 'सम्राट')
 X_OFFICIAL_HANDLES = {'samrat4bjp', 'bjp4bihar'}
 
+REDDIT_SEARCH_GROUPS = (
+    (('Samrat Choudhary', 'Samrat Chaudhary', 'सम्राट चौधरी'),
+     'Samrat Choudhary'),
+    (('Bihar BJP', 'BJP Bihar', 'Bharatiya Janata Party Bihar', 'बिहार भाजपा', 'भाजपा बिहार'),
+     'Bihar BJP'),
+    (('Bihar Government', 'Bihar Govt', 'Government of Bihar', 'बिहार सरकार'),
+     'Bihar Government'),
+    (('NDA', 'NDA Bihar', 'BJP NDA', 'एनडीए'),
+     'NDA Bihar'),
+)
+
 NEWS_SOURCE_ALIASES = {
     'News18': ('news18',),
     'Zee Bihar': ('zeebihar', 'zeebiharjharkhand', 'zeenews', 'zeehindustan'),
@@ -389,27 +400,28 @@ def _actor_input(platform, keywords, since, max_items):
             raise ProviderError('No supported X search terms are active')
         return {'searchTerms': search_terms, 'maxItems': max_items, 'sort': 'Latest + Top'}
     if platform == 'reddit':
-        searches = list(dict.fromkeys(keyword.strip() for keyword in keywords if keyword.strip()))
-        if not searches:
+        active = {keyword.strip().casefold() for keyword in keywords if keyword.strip()}
+        active_queries = [query for triggers, query in REDDIT_SEARCH_GROUPS
+                          if any(trigger.casefold() in active for trigger in triggers)]
+        if not active_queries:
             raise ProviderError('No Reddit search terms are active')
+        per_query_limit = max(1, math.ceil(max_items / len(active_queries)))
         lookback_seconds = max(0, (datetime.now(timezone.utc) - since).total_seconds())
         period = 'day' if lookback_seconds <= 86400 else 'week'
         return {
-            'searches': searches,
-            'searchPosts': True,
-            'searchComments': False,
-            'searchCommunities': False,
-            'searchUsers': False,
-            'searchMedia': False,
-            'skipComments': True,
-            'includeMediaLinks': True,
-            'includeNSFW': False,
+            'queries': active_queries,
             'sort': 'new',
-            'time': period,
-            'postDateLimit': since.date().isoformat(),
-            'maxItems': max_items,
-            'maxPostCount': max_items,
-            'maxComments': 0,
+            'timeframe': period,
+            'scrapeComments': False,
+            'includeNsfw': False,
+            'strictSearch': True,
+            'strictTokenFilter': False,
+            'dateFrom': since.date().isoformat(),
+            'forceSortNewForTimeFilteredRuns': True,
+            'maxPosts': per_query_limit,
+            'maximize_coverage': False,
+            'sentiment_analysis': False,
+            'content_analysis': False,
         }
     raise ProviderError(f'Unsupported direct Apify input for {platform}')
 
@@ -435,8 +447,9 @@ def _apify_item(platform, item, keywords, since):
     official_x_post = platform == 'x' and author_handle in X_OFFICIAL_HANDLES
     if not content or not (content_matches or official_x_post):
         return None
-    published = _timestamp(_first(item, 'publishedAt', 'published_at', 'createdAt', 'created_at', 'takenAt',
-                                  'date_utc', 'timestamp', 'date', 'time', 'timeCreated', 'article.publishedAt'))
+    published = _timestamp(_first(item, 'publishedAt', 'published_at', 'createdAt', 'created_at', 'created_utc',
+                                  'takenAt', 'date_utc', 'timestamp', 'date', 'time', 'timeCreated',
+                                  'article.publishedAt'))
     if published < since:
         return None
     url = str(_first(item, 'url', 'postUrl', 'tweetUrl', 'permalink', 'link', 'article.url', default=''))
@@ -448,7 +461,7 @@ def _apify_item(platform, item, keywords, since):
                                 'channelName', 'source', 'publisher', default='Unknown'))
     engagement = dict(
         likes=_number(item, 'likesCount', 'likeCount', 'reactionCount', 'likes', 'upVotes', 'score', 'favoriteCount', 'stats.likes', 'reactions_count', 'public_metrics.like_count'),
-        comments=_number(item, 'commentsCount', 'commentCount', 'comments', 'numberOfComments', 'numComments', 'replyCount', 'stats.comments', 'comments_count', 'public_metrics.reply_count'),
+        comments=_number(item, 'commentsCount', 'commentCount', 'comments', 'numberOfComments', 'numComments', 'num_comments', 'replyCount', 'stats.comments', 'comments_count', 'public_metrics.reply_count'),
         shares=_number(item, 'sharesCount', 'shareCount', 'shares', 'retweetCount', 'stats.shares', 'reshare_count', 'public_metrics.retweet_count'),
         views=_number(item, 'viewsCount', 'viewCount', 'videoPostViewCount', 'views', 'impressionCount', 'public_metrics.impression_count'),
     )

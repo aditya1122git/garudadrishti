@@ -9,12 +9,12 @@ DEFAULT_APIFY_ACTORS = {
     'facebook': 'apify~facebook-posts-scraper',
     'instagram': 'apify~instagram-scraper',
     'x': 'apidojo~twitter-scraper-lite',
-    'reddit': 'trudax~reddit-scraper-lite',
+    'reddit': 'fatihtahta~reddit-scraper-search-fast',
 }
 APIFY_FACEBOOK_DISCOVERY_ACTOR = 'apify~facebook-search-scraper'
 APIFY_FACEBOOK_DISCOVERY_LIMIT = 12
 APIFY_MAX_ITEMS = 50
-REDDIT_MAX_ITEMS = 20
+REDDIT_MAX_ITEMS = 10
 APIFY_RUN_TIMEOUT_SECONDS = 240
 APIFY_SYNC_INTERVAL_HOURS = 4
 DEFAULT_AUTOMATION_START_HOUR = 6
