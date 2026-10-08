@@ -37,6 +37,33 @@ async def test_exact_threshold_routes_only_below_80(monkeypatch):
     assert results[1].sentiment == 'negative'
 
 
+@pytest.mark.asyncio
+async def test_high_confidence_hf_negative_always_uses_gemini_final_label(monkeypatch):
+    settings = SimpleNamespace(
+        hf_confidence_threshold=.80, hf_model='hf', hf_revision='rev',
+        gemini_model='gemini-test', gemini_api_key='test', gemini_concurrency=2,
+    )
+    engine = Classifier(settings)
+    monkeypatch.setattr(engine, '_run', lambda texts: [
+        Result(sentiment='negative', confidence=.96, reason='HF negative',
+               hf_label='negative', hf_confidence=.96),
+    ])
+
+    class Fallback:
+        last_error = None
+
+        async def classify(self, texts):
+            assert texts == ['target-aware post']
+            return [Result(sentiment='positive', confidence=.91, reason='Target praised')]
+
+    engine._gemini = Fallback()
+    result = (await engine.classify(['target-aware post']))[0]
+    assert result.sentiment == 'positive'
+    assert result.model_used == 'gemini/gemini-test'
+    assert result.hf_label == 'negative'
+    assert result.hf_confidence == .96
+
+
 @pytest.mark.parametrize('title', [
     'अपराध पर दुख जताने के बजाय मजाक? विपक्ष के बयान पर भड़के सम्राट चौधरी! #BiharBJP',
     'जमुई कांड पर विपक्ष के बयान पर बरसे सम्राट चौधरी! #JamuiIncident',
@@ -61,6 +88,26 @@ def test_direct_target_criticism_can_stay_high_confidence_hf():
     assert result.confidence == .94
 
 
+def test_target_condolence_is_positive_despite_negative_event_words():
+    result = apply_target_context(
+        'अभिनेता श्री नाना पाटेकर जी के निधन पर सीएम श्री सम्राट चौधरी जी ने जताया दुख। '
+        '#samratchoudhary #nanapatekar',
+        Result(sentiment='negative', confidence=.8569, reason='Overall negative'), .80,
+    )
+    assert result.sentiment == 'positive'
+    assert result.confidence == .90
+    assert result.targets == ['samrat_choudhary']
+    assert result.hf_confidence is None
+
+
+def test_mocked_target_condolence_is_not_force_positive():
+    result = apply_target_context(
+        'सम्राट चौधरी ने दुख जताया लेकिन लोगों ने इसे ढोंग बताया',
+        Result(sentiment='negative', confidence=.91, reason='Overall negative'), .80,
+    )
+    assert result.sentiment == 'negative'
+
+
 def test_devanagari_target_detection():
     text = 'सम्राट चौधरी, बिहार भाजपा और बिहार सरकार'
     assert detect_targets(text) == ['samrat_choudhary', 'bihar_bjp', 'bihar_government']
@@ -80,6 +127,22 @@ async def test_unavailable_fallback_keeps_high_results_and_flags_low(monkeypatch
     results = await engine.classify(['low', 'high'])
     assert results[0].pending and not results[1].pending
     assert engine.status == 'partial'
+
+
+@pytest.mark.asyncio
+async def test_unavailable_gemini_keeps_high_hf_negative_pending(monkeypatch):
+    settings = SimpleNamespace(
+        hf_confidence_threshold=.80, hf_model='hf', hf_revision='rev',
+        gemini_model='gemini-test', gemini_api_key='', gemini_concurrency=2,
+    )
+    engine = Classifier(settings)
+    monkeypatch.setattr(engine, '_run', lambda texts: [
+        Result(sentiment='negative', confidence=.97, reason='HF negative',
+               hf_label='negative', hf_confidence=.97),
+    ])
+    result = (await engine.classify(['negative event text']))[0]
+    assert result.pending
+    assert result.review_required
 
 
 @pytest.mark.asyncio

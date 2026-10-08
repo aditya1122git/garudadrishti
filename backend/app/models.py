@@ -20,6 +20,7 @@ class Sentiment(BaseModel):
     label: Label
     confidence: float = Field(ge=0, le=1)
     reason: str = Field(max_length=300)
+    hf_label: Label | None = None
     hf_confidence: float | None = None
     language: Literal['hi', 'en', 'hinglish'] = 'en'
     targets: list[str] = Field(default_factory=list)

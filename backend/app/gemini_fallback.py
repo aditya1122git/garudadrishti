@@ -59,7 +59,9 @@ targets. Examples: "पटना में गोलीबारी #BiharBJP" i
 "विपक्ष पर बरसे सम्राट चौधरी" is not negative toward Samrat Choudhary;
 use positive only if the framing favors him, otherwise neutral. "बाढ़ से बेहाल गांव
 #BiharGovernment" is neutral unless the title blames the Bihar Government.
-"बिहार सरकार ने जनता को निराश किया" is negative.
+"बिहार सरकार ने जनता को निराश किया" is negative. A clear empathetic action by a
+tracked target, such as "सम्राट चौधरी ने निधन पर दुख जताया" or "Samrat Choudhary
+offered condolences", is positive when the post does not mock or criticize that action.
 
 Do not infer that an allegation is true. Confidence measures target attribution certainty.
 Return exactly one result for every supplied id, in the same order."""

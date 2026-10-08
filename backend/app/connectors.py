@@ -44,6 +44,27 @@ YOUTUBE_SEARCH_TERMS = (
     'NDA Bihar',
 )
 
+X_SEARCH_GROUPS = (
+    (('Samrat Choudhary', 'Samrat Chaudhary', '#SamratChoudhary'),
+     ('Samrat Choudhary', 'Samrat Chaudhary', 'CM Samrat',
+      '#SamratChoudhary', '#SamratChaudhary', '#CMSamrat')),
+    (('सम्राट चौधरी',),
+     ('सम्राट चौधरी', 'सम्राट', '@samrat4bjp', 'from:samrat4bjp')),
+    (('Bihar BJP', 'BJP Bihar', 'Bharatiya Janata Party Bihar',
+      'बिहार भाजपा', 'भाजपा बिहार', '#BiharBJP', '#BJP4Bihar'),
+     ('Bihar BJP', 'BJP Bihar', 'बिहार भाजपा', 'भाजपा बिहार',
+      '#BiharBJP', '#BJP4Bihar', '@BJP4Bihar', 'from:BJP4Bihar')),
+    (('Bihar Government', 'Bihar Govt', 'Government of Bihar', 'बिहार सरकार',
+      '#BiharGovt', '#BiharGovernment'),
+     ('Bihar Government', 'Bihar Govt', 'Government of Bihar', 'बिहार सरकार',
+      '#BiharGovt', '#BiharGovernment')),
+    (('NDA Bihar', '#NDA', '#NDAAlliance', '#NDABihar', '#BJPNDA',
+      '#भाजपाएनडीए', '#एनडीए'),
+     ('NDA Bihar', '#NDAAlliance', '#NDABihar', '#BJPNDA', '#भाजपाएनडीए', '#एनडीए')),
+)
+X_MATCH_ALIASES = ('CM Samrat', '#CMSamrat', '@samrat4bjp', '@BJP4Bihar', 'सम्राट')
+X_OFFICIAL_HANDLES = {'samrat4bjp', 'bjp4bihar'}
+
 NEWS_SOURCE_ALIASES = {
     'News18': ('news18',),
     'Zee Bihar': ('zeebihar', 'zeebiharjharkhand', 'zeenews', 'zeehindustan'),
@@ -348,7 +369,24 @@ def _actor_input(platform, keywords, since, max_items):
             'onlyPostsNewerThan': since_iso,
         }
     if platform == 'x':
-        return {'searchTerms': keywords, 'maxItems': max_items, 'sort': 'Latest'}
+        active = {keyword.casefold() for keyword in keywords}
+        search_terms = []
+        for triggers, terms in X_SEARCH_GROUPS:
+            if not any(term.casefold() in active for term in triggers):
+                continue
+            query = ' OR '.join(
+                term if term.startswith('#') else f'"{term}"'
+                for term in terms
+                if not term.startswith(('from:', '@'))
+            )
+            operators = ' OR '.join(
+                term for term in terms if term.startswith(('from:', '@'))
+            )
+            query = f'{query} OR {operators}' if operators else query
+            search_terms.append(f'({query}) since:{since.date().isoformat()}')
+        if not search_terms:
+            raise ProviderError('No supported X search terms are active')
+        return {'searchTerms': search_terms, 'maxItems': max_items, 'sort': 'Latest + Top'}
     raise ProviderError(f'Unsupported direct Apify input for {platform}')
 
 
@@ -361,7 +399,15 @@ def _apify_item(platform, item, keywords, since):
     # Social Actors expose the post body in `text`/`caption`; replies and
     # comments are intentionally excluded.
     content = text or title
-    if not content or not matches(content, keywords):
+    author_handle = str(_first(
+        item, 'author.userName', 'author.username', 'user.userName', 'user.username',
+        'ownerUsername', 'username', default='',
+    )).strip().lstrip('@').casefold()
+    content_matches = matches(
+        content, [*keywords, *X_MATCH_ALIASES] if platform == 'x' else keywords,
+    ) if content else False
+    official_x_post = platform == 'x' and author_handle in X_OFFICIAL_HANDLES
+    if not content or not (content_matches or official_x_post):
         return None
     published = _timestamp(_first(item, 'publishedAt', 'published_at', 'createdAt', 'created_at', 'takenAt',
                                   'date_utc', 'timestamp', 'date', 'time', 'timeCreated', 'article.publishedAt'))
@@ -389,7 +435,7 @@ async def _run_apify_actor(client, actor_id, api_key, payload, limit):
     actor_path = quote(actor_id.replace('/', '~'), safe='~')
     url = f'https://api.apify.com/v2/acts/{actor_path}/run-sync-get-dataset-items'
     data = await request(client, 'POST', url,
-                         params={'format': 'json', 'clean': '1', 'limit': limit, 'maxItems': limit,
+                         params={'format': 'json', 'clean': '1', 'limit': limit,
                                  'timeout': APIFY_RUN_TIMEOUT_SECONDS},
                          headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
                          timeout=APIFY_RUN_TIMEOUT_SECONDS + 15,

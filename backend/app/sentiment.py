@@ -18,11 +18,13 @@ class Result(BaseModel):
     confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
     reason: str = Field(min_length=1, max_length=300)
     model_used: str = ''
+    hf_label: Literal['positive', 'negative', 'neutral', 'mixed'] | None = None
     hf_confidence: float | None = None
     language: Literal['hi', 'en', 'hinglish'] = 'en'
     targets: list[str] = Field(default_factory=list)
     pending: bool = False
     review_required: bool = False
+    requires_gemini: bool = False
 
 
 def preprocess(text: str) -> str:
@@ -58,6 +60,23 @@ _ATTRIBUTION_RISK_PATTERN = re.compile(
     r'\u091c\u0928\s*\u0938\u0941\u0930\u093e\u091c|\u092a\u094d\u0930\u0936\u093e\u0902\u0924\s*\u0915\u093f\u0936\u094b\u0930|\u0915\u093e\u0902\u0917\u094d\u0930\u0947\u0938|'
     r'\u092e\u094b\u0926\u0940|\u0936\u093e\u0939|\u0928\u0940\u0924\u0940\u0936|'
     r'\u0932\u093e\u0932\u0942|\u0924\u0947\u091c\u0938\u094d\u0935\u0940|\u0905\u0936\u094b\u0915\s*\u091a\u094c\u0927\u0930\u0940',
+    re.IGNORECASE,
+)
+
+_TARGET_COMPASSION_PATTERN = re.compile(
+    r'(?:samrat\s*(?:choudhary|chaudhary)|\u0938\u092e\u094d\u0930\u093e\u091f\s*\u091a\u094c\u0927\u0930\u0940|'
+    r'bihar\s*(?:government|govt)|government\s+of\s+bihar|\u092c\u093f\u0939\u093e\u0930\s*\u0938\u0930\u0915\u093e\u0930)'
+    r'.{0,140}?(?:express(?:ed|es)?\s+(?:grief|sorrow|condolences)|offered?\s+condolences|paid\s+tribute|'
+    r'\u091c\u0924\u093e\u092f\u093e\s+(?:\u0926\u0941\u0916|\u0936\u094b\u0915)|'
+    r'(?:\u0926\u0941\u0916|\u0936\u094b\u0915)\s+\u091c\u0924\u093e\u092f\u093e|'
+    r'\u0936\u094b\u0915\s+\u0935\u094d\u092f\u0915\u094d\u0924\s+\u0915\u093f\u092f\u093e|'
+    r'\u0938\u0902\u0935\u0947\u0926\u0928\u093e(?:\u090f\u0902|\u092f\u0947\u0902)?\s+\u0935\u094d\u092f\u0915\u094d\u0924\s+\u0915\u0940|'
+    r'\u0936\u094d\u0930\u0926\u094d\u0927\u093e\u0902\u091c\u0932\u093f\s+(?:\u0926\u0940|\u0905\u0930\u094d\u092a\u093f\u0924\s+\u0915\u0940))',
+    re.IGNORECASE | re.DOTALL,
+)
+_COMPASSION_CRITICISM_PATTERN = re.compile(
+    r'\b(?:but|however|fake|insincere|hypocri\w*|mock\w*|critic\w*)\b|'
+    r'\u0932\u0947\u0915\u093f\u0928|\u092e\u0917\u0930|\u092a\u0930\u0902\u0924\u0941|\u0922\u094b\u0902\u0917|\u0926\u093f\u0916\u093e\u0935\u093e|\u0928\u093e\u091f\u0915',
     re.IGNORECASE,
 )
 
@@ -101,6 +120,14 @@ def apply_target_context(text: str, result: Result, verifier_gate: float = 0.80)
     result.language = detect_language(text)
     result.targets = detect_targets(text)
     without_hashtags = re.sub(r'#\S+', '', text)
+    if (_TARGET_COMPASSION_PATTERN.search(without_hashtags)
+            and not _COMPASSION_CRITICISM_PATTERN.search(without_hashtags)):
+        result.sentiment = 'positive'
+        result.confidence = .90
+        result.reason = (
+            'Tracked target is favorably framed through a clear condolence or tribute action.'
+        )
+        return result
     target_only_in_hashtag = (
         bool(_TARGET_HASHTAG_PATTERN.search(text))
         and not _TARGET_PATTERN.search(without_hashtags)
@@ -189,10 +216,15 @@ class Classifier:
                 for row, cut, cleaned, original in zip(
                         scores, truncated, batch, originals, strict=True):
                     result = result_from_scores(self._labels, row, cut, cleaned)
+                    result.hf_label = result.sentiment
                     result.hf_confidence = result.confidence
-                    results.append(apply_target_context(
+                    result = apply_target_context(
                         original, result, c.hf_confidence_threshold,
-                    ))
+                    )
+                    # HF measures overall tone. Every raw HF-negative must be
+                    # confirmed by Gemini before it can become a final label.
+                    result.requires_gemini = result.hf_label == 'negative'
+                    results.append(result)
             return results
 
     async def classify(self, texts):
@@ -208,10 +240,13 @@ class Classifier:
             results = [Result.model_validate(r) for r in results]
             for result in results:
                 result.model_used = self.provenance
+                if result.hf_label is None:
+                    result.hf_label = result.sentiment
                 if result.hf_confidence is None:
                     result.hf_confidence = result.confidence
             verify = [i for i, result in enumerate(results)
-                      if result.confidence < self.settings.hf_confidence_threshold]
+                      if (result.requires_gemini or result.sentiment == 'negative'
+                          or result.confidence < self.settings.hf_confidence_threshold)]
             if verify:
                 from .gemini_fallback import GeminiFallback
                 if self._gemini is None:
@@ -223,6 +258,7 @@ class Classifier:
                         results[index].review_required = True
                     else:
                         fallback.model_used = 'gemini/' + self.settings.gemini_model
+                        fallback.hf_label = results[index].hf_label
                         fallback.hf_confidence = results[index].hf_confidence
                         fallback.language = results[index].language
                         fallback.targets = results[index].targets
@@ -249,7 +285,7 @@ def classifier_status():
     engine = classifier()
     status = 'demo' if c.seed_mock_data else ('ready' if engine.status == 'pending' else engine.status)
     return {
-        'provider': 'Hugging Face sentiment + Gemini target verifier',
+        'provider': 'Hugging Face screening + Gemini negative verifier',
         'status': status,
         'model': c.hf_model,
         'revision': c.hf_revision,

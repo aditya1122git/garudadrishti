@@ -8,7 +8,7 @@ from pydantic import model_validator
 DEFAULT_APIFY_ACTORS = {
     'facebook': 'apify~facebook-posts-scraper',
     'instagram': 'apify~instagram-scraper',
-    'x': 'apidojo~tweet-scraper',
+    'x': 'apidojo~twitter-scraper-lite',
 }
 APIFY_FACEBOOK_DISCOVERY_ACTOR = 'apify~facebook-search-scraper'
 APIFY_FACEBOOK_DISCOVERY_LIMIT = 12

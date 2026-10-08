@@ -12,7 +12,7 @@ from app.config import Config
 from app.models import now
 from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window, _telegram_link_label
 from app.sentiment import Classifier
-from app.connectors import NEWS_CHANNELS, NEWS_SEARCH_QUERIES, matches, apify_posts, google_news_posts, _actor_input, _approved_news_source, ProviderError, request
+from app.connectors import NEWS_CHANNELS, NEWS_SEARCH_QUERIES, matches, apify_posts, google_news_posts, _actor_input, _apify_item, _approved_news_source, ProviderError, request
 
 
 def test_timezone_boundary():
@@ -57,7 +57,45 @@ def test_token_only_apify_inputs_are_platform_specific():
         'https://www.instagram.com/explore/tags/BiharBJP/',
     ]
     assert instagram['onlyPostsNewerThan'].endswith('Z')
-    assert _actor_input('x', keywords, since, 20)['searchTerms'] == keywords
+    x_input = _actor_input('x', keywords, since, 20)
+    assert x_input['sort'] == 'Latest + Top'
+    assert x_input['searchTerms'] == [
+        f'("Samrat Choudhary" OR "Samrat Chaudhary" OR "CM Samrat" OR '
+        f'#SamratChoudhary OR #SamratChaudhary OR #CMSamrat) since:{since.date().isoformat()}',
+        f'("Bihar BJP" OR "BJP Bihar" OR "बिहार भाजपा" OR "भाजपा बिहार" OR '
+        f'#BiharBJP OR #BJP4Bihar OR @BJP4Bihar OR from:BJP4Bihar) since:{since.date().isoformat()}',
+    ]
+    assert len(x_input['searchTerms']) <= 5
+
+
+def test_x_actor_combines_keyword_variants_into_broad_entity_queries():
+    since = now() - timedelta(hours=2)
+    x_input = _actor_input('x', [
+        'Samrat Choudhary', 'Samrat Chaudhary', 'सम्राट चौधरी', '#SamratChoudhary',
+        'Bihar BJP', 'BJP Bihar', 'बिहार भाजपा', '#BiharBJP',
+        'Bihar Government', 'बिहार सरकार', '#BiharGovt',
+        'NDA Bihar', '#NDABihar', '#एनडीए',
+    ], since, 50)
+    assert len(x_input['searchTerms']) == 5
+    assert all(f'since:{since.date().isoformat()}' in term for term in x_input['searchTerms'])
+    assert '"Samrat Choudhary" OR "Samrat Chaudhary"' in x_input['searchTerms'][0]
+    assert any('#BiharBJP' in term for term in x_input['searchTerms'])
+
+
+def test_x_actor_accepts_target_aliases_and_official_account_posts():
+    since = now() - timedelta(hours=2)
+    alias_item = {
+        'id': 'alias', 'text': 'CM Samrat ने आज नई पहल शुरू की',
+        'createdAt': now().isoformat(), 'url': 'https://x.com/example/status/alias',
+        'author': {'userName': 'example'},
+    }
+    official_item = {
+        'id': 'official', 'text': 'आज पटना में जनसंवाद किया।',
+        'createdAt': now().isoformat(), 'url': 'https://x.com/samrat4bjp/status/official',
+        'author': {'userName': 'samrat4bjp'},
+    }
+    assert _apify_item('x', alias_item, ['Samrat Choudhary'], since)['external_id'] == 'alias'
+    assert _apify_item('x', official_item, ['Samrat Choudhary'], since)['external_id'] == 'official'
 
 
 @pytest.mark.parametrize('source', [

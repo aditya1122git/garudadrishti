@@ -29,7 +29,7 @@ def test_overview_math_and_demo_isolation(client, auth):
     data = client.get('/api/overview', headers=auth).json()
     totals = data['today']
     assert data['demo'] is True
-    assert data['classifier']['provider'] == 'Hugging Face sentiment + Gemini target verifier'
+    assert data['classifier']['provider'] == 'Hugging Face screening + Gemini negative verifier'
     assert data['classifier']['status'] == 'demo'
     assert data['classifier']['model'] == 'cardiffnlp/twitter-xlm-roberta-base-sentiment'
     assert totals['total_count'] == 1650

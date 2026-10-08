@@ -269,16 +269,33 @@ async def sync(db, client, platforms=None):
                             'error': str(exc) if isinstance(exc, RuntimeError) else 'Connection failed; check configuration'}})
             engine = classifier()
             try:
-                posts = await db.posts.find({**POST_SCOPE, 'platform': {'$in': enabled}, 'sentiment': None, 'demo': False}).limit(200).to_list(200)
+                posts = await db.posts.find({
+                    '$and': [
+                        POST_SCOPE,
+                        {'$or': [
+                            {'sentiment': None},
+                            {'sentiment.label': 'negative', 'sentiment_schema_version': {'$lt': 7}},
+                        ]},
+                    ],
+                    'platform': {'$in': enabled},
+                    'demo': False,
+                }).limit(200).to_list(200)
                 size = config().hf_batch_size
                 for offset in range(0, len(posts), size):
                     batch = posts[offset:offset + size]
                     results = await engine.classify([p['content'] for p in batch])
                     for p, r in zip(batch, results, strict=True):
                         if r.pending:
-                            await db.posts.update_one({'_id': p['_id'], 'sentiment': None}, {'$set': {
-                                'classification_status': 'awaiting_gemini', 'hf_candidate': r.model_dump(),
-                                'classification_error': 'Gemini unavailable; low-confidence result excluded from totals'}})
+                            await db.posts.update_one({'_id': p['_id']}, {
+                                '$set': {
+                                    'classification_status': 'awaiting_gemini',
+                                    'hf_candidate': r.model_dump(),
+                                    'classification_error': (
+                                        'Gemini unavailable; unverified result excluded from totals'
+                                    ),
+                                },
+                                '$unset': {'sentiment': '', 'telegram_notification': ''},
+                            })
                             continue
                         start, end = bounds(today())
                         published_today = start <= p['published_at'] < end
@@ -287,17 +304,19 @@ async def sync(db, client, platforms=None):
                                         and not p.get('telegram_notification') else None)
                         update_fields = {'sentiment': dict(
                             label=r.sentiment, confidence=r.confidence, reason=r.reason,
-                            model_used=r.model_used or engine.provenance, hf_confidence=r.hf_confidence,
+                            model_used=r.model_used or engine.provenance, hf_label=r.hf_label,
+                            hf_confidence=r.hf_confidence,
                             language=r.language, targets=r.targets,
                             review_required=r.review_required, classified_at=now()), 'classification_status': 'classified',
-                            'sentiment_schema_version': 5}
+                            'sentiment_schema_version': 7}
                         if notification:
                             update_fields['telegram_notification'] = notification
                         unset_fields = {'classification_error': '', 'hf_candidate': ''}
                         if r.sentiment != 'negative':
                             unset_fields['telegram_notification'] = ''
-                        await db.posts.update_one({'_id': p['_id'], 'sentiment': None}, {'$set': update_fields,
-                            '$unset': unset_fields})
+                        await db.posts.update_one({'_id': p['_id']}, {
+                            '$set': update_fields, '$unset': unset_fields,
+                        })
                     # Deliver newly classified negatives immediately after each batch.
                     await notify_negative_posts(db, client)
             except Exception:
