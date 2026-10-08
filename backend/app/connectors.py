@@ -1,4 +1,4 @@
-"""Rate-aware connectors for YouTube, Google News RSS and Apify social monitoring."""
+"""Rate-aware connectors for YouTube, RSS feeds and Apify social monitoring."""
 import asyncio
 import ast
 import hashlib
@@ -19,6 +19,7 @@ from .config import (
     APIFY_MAX_ITEMS,
     APIFY_RUN_TIMEOUT_SECONDS,
     DEFAULT_APIFY_ACTORS,
+    REDDIT_MAX_ITEMS,
     config,
 )
 
@@ -387,18 +388,43 @@ def _actor_input(platform, keywords, since, max_items):
         if not search_terms:
             raise ProviderError('No supported X search terms are active')
         return {'searchTerms': search_terms, 'maxItems': max_items, 'sort': 'Latest + Top'}
+    if platform == 'reddit':
+        searches = list(dict.fromkeys(keyword.strip() for keyword in keywords if keyword.strip()))
+        if not searches:
+            raise ProviderError('No Reddit search terms are active')
+        lookback_seconds = max(0, (datetime.now(timezone.utc) - since).total_seconds())
+        period = 'day' if lookback_seconds <= 86400 else 'week'
+        return {
+            'searches': searches,
+            'searchPosts': True,
+            'searchComments': False,
+            'searchCommunities': False,
+            'searchUsers': False,
+            'searchMedia': False,
+            'skipComments': True,
+            'includeMediaLinks': True,
+            'includeNSFW': False,
+            'sort': 'new',
+            'time': period,
+            'postDateLimit': since.date().isoformat(),
+            'maxItems': max_items,
+            'maxPostCount': max_items,
+            'maxComments': 0,
+        }
     raise ProviderError(f'Unsupported direct Apify input for {platform}')
 
 
 def _apify_item(platform, item, keywords, since):
     if not isinstance(item, dict):
         return None
+    if platform == 'reddit' and str(item.get('dataType', 'post')).casefold() != 'post':
+        return None
     title = str(_first(item, 'title', 'headline', 'article.title', default='')).strip()
     text = str(_first(item, 'text', 'full_text', 'tweetText', 'postText', 'message', 'caption',
-                      'description', 'snippet', 'article.description', default='')).strip()
+                      'description', 'snippet', 'body', 'selftext', 'article.description', default='')).strip()
     # Social Actors expose the post body in `text`/`caption`; replies and
     # comments are intentionally excluded.
-    content = text or title
+    content = f'{title}\n{text}'.strip() if platform == 'reddit' else text or title
     author_handle = str(_first(
         item, 'author.userName', 'author.username', 'user.userName', 'user.username',
         'ownerUsername', 'username', default='',
@@ -421,13 +447,15 @@ def _apify_item(platform, item, keywords, since):
                                 'author', 'ownerUsername', 'username', 'fullName', 'user.pageName', 'user.name', 'user',
                                 'channelName', 'source', 'publisher', default='Unknown'))
     engagement = dict(
-        likes=_number(item, 'likesCount', 'likeCount', 'reactionCount', 'likes', 'favoriteCount', 'stats.likes', 'reactions_count', 'public_metrics.like_count'),
-        comments=_number(item, 'commentsCount', 'commentCount', 'comments', 'replyCount', 'stats.comments', 'comments_count', 'public_metrics.reply_count'),
+        likes=_number(item, 'likesCount', 'likeCount', 'reactionCount', 'likes', 'upVotes', 'score', 'favoriteCount', 'stats.likes', 'reactions_count', 'public_metrics.like_count'),
+        comments=_number(item, 'commentsCount', 'commentCount', 'comments', 'numberOfComments', 'numComments', 'replyCount', 'stats.comments', 'comments_count', 'public_metrics.reply_count'),
         shares=_number(item, 'sharesCount', 'shareCount', 'shares', 'retweetCount', 'stats.shares', 'reshare_count', 'public_metrics.retweet_count'),
         views=_number(item, 'viewsCount', 'viewCount', 'videoPostViewCount', 'views', 'impressionCount', 'public_metrics.impression_count'),
     )
     row = post(platform, external_id, author, content, url, published.isoformat(), engagement)
-    row.update(source_provider='apify', content_scope='apify-public-post-v1')
+    row.update(source_provider='apify', content_scope=(
+        'reddit-public-post-v1' if platform == 'reddit' else 'apify-public-post-v1'
+    ))
     return row
 
 
@@ -450,7 +478,7 @@ async def apify_posts(client, platform, secret, keywords, since):
     api_key = str(secret.get('api_key', '')).strip()
     if not api_key:
         raise ProviderError('Missing Apify API token')
-    max_items = APIFY_MAX_ITEMS
+    max_items = REDDIT_MAX_ITEMS if platform == 'reddit' else APIFY_MAX_ITEMS
     if platform == 'facebook':
         # The official Posts Actor accepts page/profile URLs, not keywords.
         # Discover matching public pages first, then fetch their latest posts.

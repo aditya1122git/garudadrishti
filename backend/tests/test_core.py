@@ -25,6 +25,7 @@ def test_telegram_link_labels_are_platform_specific():
     assert _telegram_link_label('x') == 'View on X'
     assert _telegram_link_label('youtube') == 'View on YouTube'
     assert _telegram_link_label('instagram') == 'View on Instagram'
+    assert _telegram_link_label('reddit') == 'View on Reddit'
 
 
 def test_bootstrap_credentials_are_optional_for_existing_database():
@@ -316,6 +317,32 @@ async def test_google_news_rss_input_and_output_mapping():
     assert rows[0]['url'] == 'https://news.google.com/rss/articles/story'
     assert rows[0]['content'] == 'Samrat Choudhary addresses Bihar rally'
     assert rows[0]['source_provider'] == 'google-news-rss'
+
+
+def test_reddit_actor_input_and_post_mapping():
+    since = now() - timedelta(hours=6)
+    payload = _actor_input('reddit', ['Samrat Choudhary', 'Bihar BJP'], since, 20)
+    assert payload['searches'] == ['Samrat Choudhary', 'Bihar BJP']
+    assert payload['searchPosts'] is True and payload['searchComments'] is False
+    assert payload['skipComments'] is True and payload['includeNSFW'] is False
+    assert payload['sort'] == 'new' and payload['time'] == 'day'
+    assert payload['maxItems'] == payload['maxPostCount'] == 20
+
+    row = _apify_item('reddit', {
+        'id': 't3_reddit1', 'dataType': 'post',
+        'title': 'Samrat Choudhary announces a Bihar development programme',
+        'body': 'The Bihar BJP discussed the programme today.',
+        'username': 'bihar_observer', 'upVotes': 42, 'numberOfComments': 7,
+        'createdAt': now().isoformat(),
+        'url': 'https://www.reddit.com/r/bihar/comments/reddit1/example/',
+    }, ['Samrat Choudhary', 'Bihar BJP'], since)
+    assert row['platform'] == 'reddit' and row['external_id'] == 't3_reddit1'
+    assert row['author'] == 'bihar_observer'
+    assert row['engagement']['likes'] == 42 and row['engagement']['comments'] == 7
+    assert row['content_scope'] == 'reddit-public-post-v1'
+    assert _apify_item('reddit', {
+        'id': 't1_comment', 'dataType': 'comment', 'body': 'Bihar BJP',
+    }, ['Bihar BJP'], since) is None
 
 
 def test_automation_window_uses_ist(monkeypatch):

@@ -14,7 +14,7 @@ from .sentiment import classifier
 
 POST_SCOPE = {'$or': [{'platform': {'$ne': 'youtube'}}, {'demo': True}, {'content_scope': 'youtube-title-only-v2'}]}
 
-PLATFORMS = ['facebook', 'instagram', 'x', 'youtube', 'news']
+PLATFORMS = ['facebook', 'instagram', 'x', 'youtube', 'news', 'reddit']
 TRACKING_SCOPE_VERSION = 'samrat-bihar-bjp-government-v2'
 DEFAULT_KEYWORD_VARIANTS = [
     'Samrat Chaudhary', 'BJP Bihar', 'Bihar Bharatiya Janata Party',
@@ -131,6 +131,7 @@ def _telegram_link_label(platform: object) -> str:
         'x': 'View on X',
         'youtube': 'View on YouTube',
         'news': 'View on News',
+        'reddit': 'View on Reddit',
     }.get(key, 'View original post')
 
 async def notify_negative_posts(db, client):

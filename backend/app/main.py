@@ -87,7 +87,7 @@ def automation_schedule():
             'next_run_at': next_time('all-sources-4h', 'youtube-news-quarter-hour', 'youtube-news-full-hour'),
         },
         'social': {
-            'label': 'Facebook + Instagram + X', 'interval_seconds': 4 * 60 * 60,
+            'label': 'Facebook + Instagram + X + Reddit', 'interval_seconds': 4 * 60 * 60,
             'next_run_at': next_time('all-sources-4h'),
         },
     }
@@ -155,7 +155,7 @@ async def lifespan(app):
                          })),
             '$setOnInsert': dict(status='pending', last_synced_at=None),
         }, upsert=True)
-    for p in ['facebook', 'instagram', 'x']:
+    for p in ['facebook', 'instagram', 'x', 'reddit']:
         if c.apify_api_token and not c.seed_mock_data and p in c.enabled_platforms.split(','):
             secret = {'api_key': c.apify_api_token}
             await db.platform_credentials.update_one({'platform': p}, {'$set': dict(platform=p, mode='apify',

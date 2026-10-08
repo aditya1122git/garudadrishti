@@ -9,10 +9,12 @@ DEFAULT_APIFY_ACTORS = {
     'facebook': 'apify~facebook-posts-scraper',
     'instagram': 'apify~instagram-scraper',
     'x': 'apidojo~twitter-scraper-lite',
+    'reddit': 'trudax~reddit-scraper-lite',
 }
 APIFY_FACEBOOK_DISCOVERY_ACTOR = 'apify~facebook-search-scraper'
 APIFY_FACEBOOK_DISCOVERY_LIMIT = 12
 APIFY_MAX_ITEMS = 50
+REDDIT_MAX_ITEMS = 20
 APIFY_RUN_TIMEOUT_SECONDS = 240
 APIFY_SYNC_INTERVAL_HOURS = 4
 DEFAULT_AUTOMATION_START_HOUR = 6
@@ -42,7 +44,7 @@ class Config(BaseSettings):
     gemini_model: str = 'gemini-3.5-flash-lite'
     hf_confidence_threshold: float = 0.80
     gemini_concurrency: int = 2
-    enabled_platforms: str = 'facebook,instagram,x,youtube,news'
+    enabled_platforms: str = 'facebook,instagram,x,youtube,news,reddit'
     apify_api_token: str = ''
     youtube_api_key: str = ''
     youtube_backup_api_key: str = ''
@@ -85,7 +87,7 @@ class Config(BaseSettings):
             raise ValueError('Invalid classifier threshold/concurrency')
         if not 1 <= self.youtube_initial_lookback_days <= 30:
             raise ValueError('Invalid YouTube search coverage settings')
-        if set(self.enabled_platforms.split(',')) - {'facebook', 'instagram', 'x', 'youtube', 'news'}:
+        if set(self.enabled_platforms.split(',')) - {'facebook', 'instagram', 'x', 'youtube', 'news', 'reddit'}:
             raise ValueError('Invalid ENABLED_PLATFORMS')
         if self.youtube_sync_interval_minutes != 15:
             raise ValueError('YouTube sync interval must remain 15 minutes')

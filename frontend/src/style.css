@@ -720,7 +720,7 @@ main {
 }
 .source-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
   padding: 19px 10px 22px;
 }
 .source-item {
@@ -775,6 +775,11 @@ main {
 }
 .source-state {
   color: #348973;
+}
+
+.platform-mark.reddit {
+  color: #ff4500;
+  background: #fff0eb;
 }
 .source-error {
   color: #c4433d;
@@ -969,6 +974,10 @@ main {
 .sentiment.neutral {
   background: #f0f3f6;
   color: #75889a;
+}
+.mini-platform.reddit {
+  color: #ff4500;
+  background: #fff0eb;
 }
 .sentiment.mixed {
   background: #fff5e5;

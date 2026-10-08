@@ -106,6 +106,7 @@ const names: Record<string, string> = {
   x: "X / Twitter",
   youtube: "YouTube",
   news: "News",
+  reddit: "Reddit",
 };
 
 function sourceStatus(source: Source) {
