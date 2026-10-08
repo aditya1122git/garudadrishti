@@ -27,6 +27,15 @@ def test_pdf_lists_filtered_posts_by_platform_with_clickable_links_and_poppins()
             'engagement_score': 17,
             'sentiment': {'label': 'negative', 'confidence': .87},
         },
+        {
+            'platform': 'reddit',
+            'author': 'Long Form Redditor',
+            'content': 'A very long Reddit discussion about Bihar BJP. ' * 300,
+            'url': 'https://reddit.com/r/bihar/comments/long-post',
+            'published_at': datetime(2026, 10, 3, 10, 30, tzinfo=timezone.utc),
+            'engagement_score': 5,
+            'sentiment': {'label': 'negative', 'confidence': .82},
+        },
     ]
     build_sentiment_pdf(
         stream,
@@ -54,6 +63,7 @@ def test_pdf_lists_filtered_posts_by_platform_with_clickable_links_and_poppins()
     }
     assert 'Facebook negative posts' in text
     assert 'Youtube negative posts' in text
+    assert 'Reddit negative posts' in text
     assert 'GarudaDrishti' in text
     assert 'JanNetra' not in text
     assert 'Data source status' not in text

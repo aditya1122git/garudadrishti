@@ -48,6 +48,7 @@ BLUE_PALE = BRAND_PALE
 WHITE = colors.white
 
 FONT_DIR = Path(__file__).with_name('assets') / 'fonts'
+PDF_POST_EXCERPT_CHARS = 1400
 
 
 def _fonts() -> tuple[str, str]:
@@ -312,7 +313,13 @@ def build_sentiment_pdf(
                 f'&nbsp;&nbsp;|&nbsp;&nbsp; Engagement {engagement_total:,}',
                 styles['JNMeta'],
             )
-            body = Paragraph(_clean(post.get('content') or 'Content unavailable'), styles['JNBody'])
+            # A ReportLab table row cannot split across pages. Reddit and some
+            # Instagram captions can contain thousands of characters, so keep a
+            # useful evidence excerpt and preserve the clickable original link.
+            body = Paragraph(
+                _clean(post.get('content') or 'Content unavailable', PDF_POST_EXCERPT_CHARS),
+                styles['JNBody'],
+            )
             link_para = Paragraph(link_text, styles['JNLink'])
             card = Table([[heading], [meta], [body], [link_para]], colWidths=[page_w - left - right - 8*mm])
             card_tint = {
