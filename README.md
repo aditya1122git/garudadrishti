@@ -68,15 +68,16 @@ A local `.env` is provided beside `docker-compose.yml`. It is ignored by Git and
 | `HF_LOCAL_FILES_ONLY` | Offline cache-only loading after downloading weights; default false |
 | `GEMINI_API_KEY`, `GEMINI_MODEL` | Target-aware verifier key and model; default `gemini-3.5-flash-lite` |
 | `HF_CONFIDENCE_THRESHOLD`, `GEMINI_CONCURRENCY` | Gemini gate defaults to 0.80; 2 concurrent calls |
-| `ENABLED_PLATFORMS` | Comma-separated sources: `facebook,instagram,x,youtube,news`; set `youtube` for YouTube-only operation |
+| `ENABLED_PLATFORMS` | Comma-separated sources: `facebook,instagram,x,youtube,news,reddit`; set `youtube` for YouTube-only operation |
 | `YOUTUBE_API_KEY`, `YOUTUBE_BACKUP_API_KEY` | Primary YouTube Data API v3 key and optional quota-fallback key |
 | `YOUTUBE_INITIAL_LOOKBACK_DAYS` | First-run YouTube backfill window (default 7 days) |
-| `APIFY_API_TOKEN` | Shared by the Facebook, Instagram and X connectors; News does not use Apify |
+| `APIFY_API_TOKEN` | Primary Facebook, Instagram, X and Reddit connector token |
+| `DATA365_API_TOKEN` | Fallback for those four social sources when Apify errors or returns zero usable posts |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Enable one Telegram message, including the source link, for each newly classified negative post |
 | `ALLOWED_ORIGINS` | Exact CORS origins for the UI |
 | `REPORTING_TIMEZONE` | `Asia/Kolkata` by default |
 | `SCHEDULER_ENABLED` | Enables server-side automation; no admin session or open browser is required |
-| `YOUTUBE_SYNC_INTERVAL_MINUTES` | Fixed YouTube/Google News 15-minute schedule; social Apify sources run every 4 hours |
+| `YOUTUBE_SYNC_INTERVAL_MINUTES` | Fixed YouTube/Google News 15-minute schedule; social sources run every 4 hours |
 
 ### Hugging Face multilingual classifier
 
@@ -100,21 +101,22 @@ This uses built-in sample text only. It does not write posts, connect to social 
 
 | Platform | Implemented connector | Required access / coverage |
 |---|---|---|
-| X | Configured Apify Actor, normalized output, overlap deduplication and retry/backoff | Apify token, Actor access and the Actor's input schema. |
+| X | Apify primary, Data365 fallback, normalized output, overlap deduplication and retry/backoff | At least one social-provider token; both are recommended for fallback. |
 | YouTube | Official Data API v3 video search + `videos.list` snippet/statistics | Every 15 minutes inside the admin-configured active window, one combined search covers all tracked terms and includes regular videos and Shorts. `videos.list` supplies duration and engagement metadata. If the primary key reports quota exhaustion, the connector switches to `YOUTUBE_BACKUP_API_KEY` for the rest of that run. The initial strategy upgrade backfills 7 days. Only the video title is matched, stored, and classified. Descriptions and comments are excluded. |
-| Facebook | Configured Apify Actor | Actor access and a compatible output schema. |
-| Instagram | Configured Apify Actor | Actor access and a compatible output schema. |
+| Facebook | Apify primary, Data365 fallback | At least one social-provider token; both are recommended for fallback. |
+| Instagram | Apify primary, Data365 fallback | At least one social-provider token; both are recommended for fallback. |
+| Reddit | Apify primary, Data365 fallback | Public post search; comments are not ingested. |
 | News | Google News RSS search feeds | Credential-free RSS ingestion runs every 15 minutes inside the admin-configured active window. Approved Bihar coverage includes News18, Zee Bihar, ABP Bihar, News State, Sahara Samay, Bihar Tak, First Bihar, Live Cities, News4Nation, Hindustani Media, Dainik Jagran Bihar, TV9 Bihar/Jharkhand, Dainik Bhaskar Bihar, Prabhat Khabar, Live Hindustan Bihar, ETV Bharat Bihar and Navbharat Times Bihar. The headline is classified and the Google News article link is retained. |
 
 There is no manual upload/CSV/JSON import endpoint or UI; CSV is export only. Missing Actor credentials show **Not connected**, never fabricated zeros. An unavailable source remains identifiable and its last observed figures are marked partial/stale. Zero engagement metrics may represent unavailable fields; ?interactions? is likes + comments + shares, not views.
 
 YouTube Search API is relevance-ranked and does not promise an exhaustive list of every matching upload. JanNetra searches public videos across channels; it cannot use a person's YouTube watch history. One combined search per run keeps the normal 06:00-22:00 schedule near 65 search calls per day; manual refreshes add calls. YouTube quota is allocated per Google Cloud project, so use a backup key from another properly configured project if independent fallback capacity is required. Broad keywords such as Bihar Government can be noisy; deactivate or refine them in Settings if appropriate.
 
-### Apify Actor contract
+### Social provider contract
 
-`APIFY_API_TOKEN` is the only Apify environment value. JanNetra fixes the social Actors to `apify/facebook-posts-scraper`, `apify/instagram-scraper`, and `apidojo/tweet-scraper`. Because Facebook's Posts Actor requires page URLs, JanNetra first discovers relevant public pages through `apify/facebook-search-scraper`, then fetches their latest posts. News is fetched separately from Google News RSS and requires no API token. Social connectors use bearer authentication, bounded synchronous runs, keyword filtering and retry/backoff.
+Apify remains the primary social provider. The application uses fixed Actors for Facebook, Instagram, X and Reddit; Facebook page discovery runs before its posts Actor. If Apify fails or produces zero usable rows, the same platform sync starts a bounded [Data365](https://data365.co/) asynchronous search, polls it to completion, then normalizes its items into the shared post schema. Data365 is not called after a successful non-empty Apify run, which avoids duplicate paid work. News remains separate and credential-free through Google News RSS.
 
-Actor IDs and JSON templates remain optional advanced overrides because Store Actors and their schemas can change independently of JanNetra. Output normalization accepts common IDs, post text/caption/title, publication timestamps, URLs, authors and engagement counts. Items without a usable timestamp or tracked term are excluded.
+Output normalization accepts common IDs, post text/caption/title, publication timestamps, URLs, authors and engagement counts. Items without a usable timestamp or tracked term are excluded. The database records the provider used for the last successful social sync and the reason a fallback was needed.
 
 ## Data flow, reporting and alerts
 

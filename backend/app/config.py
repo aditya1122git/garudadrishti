@@ -17,6 +17,9 @@ APIFY_MAX_ITEMS = 50
 REDDIT_MAX_ITEMS = 10
 APIFY_RUN_TIMEOUT_SECONDS = 240
 APIFY_SYNC_INTERVAL_HOURS = 4
+DATA365_MAX_ITEMS = 20
+DATA365_POLL_INTERVAL_SECONDS = 5
+DATA365_TASK_TIMEOUT_SECONDS = 330
 DEFAULT_AUTOMATION_START_HOUR = 6
 DEFAULT_AUTOMATION_END_HOUR = 22
 
@@ -46,6 +49,7 @@ class Config(BaseSettings):
     gemini_concurrency: int = 2
     enabled_platforms: str = 'facebook,instagram,x,youtube,news,reddit'
     apify_api_token: str = ''
+    data365_api_token: str = ''
     youtube_api_key: str = ''
     youtube_backup_api_key: str = ''
     youtube_initial_lookback_days: int = 7

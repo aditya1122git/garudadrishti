@@ -10,6 +10,7 @@ from pymongo.errors import DuplicateKeyError
 from .config import config, DEFAULT_AUTOMATION_START_HOUR, DEFAULT_AUTOMATION_END_HOUR
 from .models import now
 from .connectors import apify_posts, google_news_posts, youtube_posts, request
+from .data365 import data365_posts
 from .sentiment import classifier
 
 POST_SCOPE = {'$or': [{'platform': {'$ne': 'youtube'}}, {'demo': True}, {'content_scope': 'youtube-title-only-v2'}]}
@@ -66,9 +67,15 @@ async def statuses(db):
         if config().seed_mock_data and p in ['x', 'youtube']:
             result.append(dict(platform=p, source='Demo', status='demo', last_synced_at=now()))
         elif c:
-            source = 'Google News RSS' if p == 'news' else 'Apify Actor' if c['mode'] == 'apify' else 'Live API'
+            source = {
+                'news': 'Google News RSS',
+                'apify': 'Apify Actor',
+                'data365': 'Data365 API',
+                'hybrid': 'Apify + Data365',
+            }.get(p if p == 'news' else c.get('mode'), 'Live API')
             result.append(dict(platform=p, source=source,
-                               status=c.get('status', 'pending'), last_synced_at=c.get('last_synced_at'), error=c.get('error')))
+                               status=c.get('status', 'pending'), last_synced_at=c.get('last_synced_at'),
+                               error=c.get('error'), last_provider=c.get('last_provider')))
         else:
             result.append(dict(platform=p, source='Not connected', status='disconnected', last_synced_at=None))
     return result
@@ -203,6 +210,42 @@ def sync_running():
     """Report whether an ingestion/classification cycle currently owns the lock."""
     return _sync_lock.locked()
 
+
+async def _social_posts_with_fallback(client, platform, secret, keywords, since):
+    """Prefer Apify, using Data365 only after an error or zero usable rows."""
+    apify_token = str(secret.get('api_key', '')).strip()
+    data365_token = str(secret.get('data365_api_token', '')).strip()
+    if not apify_token and not data365_token:
+        raise RuntimeError('Neither Apify nor Data365 is configured')
+
+    apify_empty = False
+    apify_error = None
+    if apify_token:
+        try:
+            rows = await apify_posts(client, platform, secret, keywords, since)
+            if rows:
+                return rows, 'apify', None
+            apify_empty = True
+        except Exception as exc:
+            apify_error = str(exc) if isinstance(exc, RuntimeError) else 'Connection failed'
+
+    if data365_token:
+        try:
+            rows = await data365_posts(client, platform, secret, keywords, since)
+            fallback_reason = apify_error or ('Apify returned no usable posts' if apify_empty else None)
+            return rows, 'data365', fallback_reason
+        except Exception as exc:
+            data365_error = str(exc) if isinstance(exc, RuntimeError) else 'Connection failed'
+            if apify_error:
+                raise RuntimeError(f'Apify: {apify_error}; Data365: {data365_error}') from None
+            if apify_empty:
+                raise RuntimeError(f'Apify returned no usable posts; Data365: {data365_error}') from None
+            raise RuntimeError(f'Data365: {data365_error}') from None
+
+    if apify_error:
+        raise RuntimeError(f'Apify: {apify_error}') from None
+    return [], 'apify', None
+
 async def scheduled_sync(db, client, platforms):
     """Run without any logged-in user, but only inside the operating window."""
     prefs = await settings(db)
@@ -247,9 +290,9 @@ async def sync(db, client, platforms=None):
                         elif p == 'news':
                             rows = await google_news_posts(client, keywords, since)
                         else:
-                            if c['mode'] != 'apify':
-                                raise RuntimeError('This source must be configured with Apify')
-                            rows = await apify_posts(client, p, secret, keywords, since)
+                            rows, provider_used, fallback_reason = await _social_posts_with_fallback(
+                                client, p, secret, keywords, since,
+                            )
                         for row in rows:
                             if p == 'youtube':
                                 # Upgrade legacy search snippets to full video content once.
@@ -260,6 +303,9 @@ async def sync(db, client, platforms=None):
                         credential_update = {'last_synced_at': started, 'status': 'live', 'error': None,
                                              'tracking_scope_version': TRACKING_SCOPE_VERSION,
                                              'encrypted_api_key': encrypt(secret)}
+                        if p in {'facebook', 'instagram', 'x', 'reddit'}:
+                            credential_update['last_provider'] = provider_used
+                            credential_update['fallback_reason'] = fallback_reason
                         if p == 'youtube':
                             credential_update['search_strategy'] = 'keyword-and-short-v3'
                         elif p == 'news':

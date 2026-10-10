@@ -1,4 +1,4 @@
-"""Rate-aware connectors for YouTube, RSS feeds and Apify social monitoring."""
+"""Rate-aware connectors for YouTube, RSS and social monitoring providers."""
 import asyncio
 import ast
 import hashlib
@@ -487,7 +487,7 @@ async def _run_apify_actor(client, actor_id, api_key, payload, limit):
 
 
 async def apify_posts(client, platform, secret, keywords, since):
-    """Run JanNetra's fixed Apify Actors and normalize public social posts."""
+    """Run the configured Apify Actors and normalize public social posts."""
     api_key = str(secret.get('api_key', '')).strip()
     if not api_key:
         raise ProviderError('Missing Apify API token')

@@ -87,7 +87,7 @@ class TrackedKeyword(Document):
 class PlatformCredential(Document):
     schema_version: int = 1
     platform: str
-    mode: Literal['official', 'apify'] = 'official'
+    mode: Literal['official', 'apify', 'data365', 'hybrid'] = 'official'
     encrypted_api_key: str
     status: str = 'pending'
     last_synced_at: datetime | None = None

@@ -156,12 +156,22 @@ async def lifespan(app):
             '$setOnInsert': dict(status='pending', last_synced_at=None),
         }, upsert=True)
     for p in ['facebook', 'instagram', 'x', 'reddit']:
-        if c.apify_api_token and not c.seed_mock_data and p in c.enabled_platforms.split(','):
-            secret = {'api_key': c.apify_api_token}
-            await db.platform_credentials.update_one({'platform': p}, {'$set': dict(platform=p, mode='apify',
-                encrypted_api_key=encrypt(secret), status='pending', last_synced_at=None)}, upsert=True)
+        if ((c.apify_api_token or c.data365_api_token) and not c.seed_mock_data
+                and p in c.enabled_platforms.split(',')):
+            secret = {}
+            if c.apify_api_token:
+                secret['api_key'] = c.apify_api_token
+            if c.data365_api_token:
+                secret['data365_api_token'] = c.data365_api_token
+            mode = 'hybrid' if len(secret) == 2 else 'apify' if c.apify_api_token else 'data365'
+            await db.platform_credentials.update_one({'platform': p}, {
+                '$set': dict(platform=p, mode=mode, encrypted_api_key=encrypt(secret)),
+                '$setOnInsert': dict(status='pending', last_synced_at=None),
+            }, upsert=True)
         elif not c.seed_mock_data:
-            await db.platform_credentials.delete_one({'platform': p, 'mode': {'$ne': 'apify'}})
+            await db.platform_credentials.delete_one({
+                'platform': p, 'mode': {'$nin': ['apify', 'data365', 'hybrid']},
+            })
     if not c.seed_mock_data and 'news' in c.enabled_platforms.split(','):
         # News is always credential-free Google RSS. Repair any stale
         # credential/error left by older deployments before the next run.

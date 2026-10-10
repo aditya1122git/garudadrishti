@@ -6,13 +6,15 @@ import json
 from datetime import timedelta
 import pytest
 import httpx
+import app.data365 as data365_module
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
 from app.config import Config
 from app.models import now
-from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window, _telegram_link_label
+from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window, _telegram_link_label, _social_posts_with_fallback
 from app.sentiment import Classifier
 from app.connectors import NEWS_CHANNELS, NEWS_SEARCH_QUERIES, matches, apify_posts, google_news_posts, _actor_input, _apify_item, _approved_news_source, ProviderError, request
+from app.data365 import data365_posts, _data365_request_spec
 
 
 def test_timezone_boundary():
@@ -290,6 +292,87 @@ async def test_apify_normalizes_serialized_facebook_author():
         rows = await apify_posts(client, 'facebook', {'api_key': 'token'},
                                  ['Bihar Government'], now() - timedelta(hours=1))
     assert rows[0]['author'] == 'Jagarit Bihar'
+
+
+@pytest.mark.asyncio
+async def test_data365_async_search_normalizes_x_posts():
+    requests = []
+
+    def handler(req):
+        requests.append(req)
+        assert req.url.params['access_token'] == 'data365-token-value'
+        if req.method == 'POST':
+            return httpx.Response(202, json={'status': 'accepted', 'data': {'task_id': 'task-1'}})
+        if str(req.url.path).endswith('/update'):
+            return httpx.Response(200, json={'status': 'ok', 'data': {'status': 'finished'}})
+        return httpx.Response(200, json={'status': 'ok', 'data': {'items': [{
+            'id': '19001', 'text': 'Samrat Choudhary reviews Bihar development work',
+            'created_time': now().isoformat(), 'author_username': 'reporter_bihar',
+            'favorite_count': 18, 'reply_count': 3, 'retweet_count': 5,
+        }]}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        rows = await data365_posts(client, 'x', {'data365_api_token': 'data365-token-value'},
+                                   ['Samrat Choudhary'], now() - timedelta(hours=1))
+    assert [req.method for req in requests] == ['POST', 'GET', 'GET']
+    assert rows[0]['external_id'] == '19001'
+    assert rows[0]['url'] == 'https://x.com/reporter_bihar/status/19001'
+    assert rows[0]['engagement'] == {'likes': 18, 'comments': 3, 'shares': 5, 'views': 0}
+    assert rows[0]['source_provider'] == 'data365'
+
+
+@pytest.mark.parametrize('platform', ['instagram', 'reddit'])
+def test_data365_search_status_uses_update_endpoint(platform):
+    create_url, _, status_url, _, _, _ = _data365_request_spec(
+        platform, 'Samrat Choudhary', now() - timedelta(hours=1), 10,
+    )
+    assert create_url.endswith('/update')
+    assert status_url == create_url
+    if platform == 'instagram':
+        assert '/instagram/tag/Samrat%20Choudhary/' in create_url
+
+
+@pytest.mark.asyncio
+async def test_social_provider_falls_back_to_data365_only_for_empty_apify(monkeypatch):
+    calls = []
+
+    async def empty_apify(*args):
+        calls.append('apify')
+        return []
+
+    async def working_data365(*args):
+        calls.append('data365')
+        return [{'external_id': 'fallback-1'}]
+
+    monkeypatch.setattr('app.services.apify_posts', empty_apify)
+    monkeypatch.setattr('app.services.data365_posts', working_data365)
+    rows, provider, reason = await _social_posts_with_fallback(
+        None, 'x', {'api_key': 'a', 'data365_api_token': 'd'},
+        ['Samrat Choudhary'], now() - timedelta(hours=1),
+    )
+    assert calls == ['apify', 'data365']
+    assert rows == [{'external_id': 'fallback-1'}]
+    assert provider == 'data365' and reason == 'Apify returned no usable posts'
+
+
+@pytest.mark.asyncio
+async def test_data365_keeps_partial_results_when_one_search_fails(monkeypatch):
+    async def partial_search(client, platform, token, query, since, max_posts):
+        if query == 'Bihar BJP':
+            raise ProviderError('One Data365 task failed')
+        return [{
+            'id': 'partial-1', 'text': 'Samrat Choudhary reviews Bihar projects',
+            'created_time': now().isoformat(), 'owner_username': 'bihar_updates',
+        }]
+
+    monkeypatch.setattr(data365_module, '_run_data365_search', partial_search)
+    rows = await data365_posts(
+        None, 'instagram', {'data365_api_token': 'token'},
+        ['Samrat Choudhary', 'Bihar BJP'], now() - timedelta(hours=1),
+    )
+    assert len(rows) == 1
+    assert rows[0]['external_id'] == 'partial-1'
+    assert rows[0]['source_provider'] == 'data365'
 
 
 @pytest.mark.asyncio
