@@ -16,10 +16,8 @@ import httpx
 from .config import (
     APIFY_FACEBOOK_DISCOVERY_ACTOR,
     APIFY_FACEBOOK_DISCOVERY_LIMIT,
-    APIFY_MAX_ITEMS,
     APIFY_RUN_TIMEOUT_SECONDS,
     DEFAULT_APIFY_ACTORS,
-    REDDIT_MAX_ITEMS,
     config,
 )
 
@@ -205,14 +203,27 @@ async def youtube_posts(client, secret, keywords, since):
     # though compact entity searches work. Use one stable discovery query;
     # the complete editable keyword set still filters returned video titles.
     query_terms = list(YOUTUBE_SEARCH_TERMS)
-    data = await youtube_get('search', dict(
+    search_params = dict(
         part='snippet', type='video', order='date', maxResults=50,
         q='|'.join(query_terms), publishedAfter=since.isoformat().replace('+00:00', 'Z'),
-    ))
-    for item in data.get('items', []):
-        video_id = item.get('id', {}).get('videoId')
-        if video_id:
-            videos[video_id] = {'general-search'}
+    )
+    # search.list returns at most 50 rows per response. Exhaust pageToken so a
+    # busy 15-minute interval is not silently truncated to its first 50 videos.
+    page_token = None
+    seen_page_tokens = set()
+    while True:
+        data = await youtube_get('search', {
+            **search_params, **({'pageToken': page_token} if page_token else {}),
+        })
+        for item in data.get('items', []):
+            video_id = item.get('id', {}).get('videoId')
+            if video_id:
+                videos[video_id] = {'general-search'}
+        next_page_token = str(data.get('nextPageToken') or '').strip()
+        if not next_page_token or next_page_token in seen_page_tokens:
+            break
+        seen_page_tokens.add(next_page_token)
+        page_token = next_page_token
     # Fetch stable video metadata in batches. Sentiment uses the title only.
     ids = list(videos)
     for offset in range(0, len(ids), 50):
@@ -405,7 +416,6 @@ def _actor_input(platform, keywords, since, max_items):
                           if any(trigger.casefold() in active for trigger in triggers)]
         if not active_queries:
             raise ProviderError('No Reddit search terms are active')
-        per_query_limit = max(1, math.ceil(max_items / len(active_queries)))
         lookback_seconds = max(0, (datetime.now(timezone.utc) - since).total_seconds())
         period = 'day' if lookback_seconds <= 86400 else 'week'
         return {
@@ -418,7 +428,9 @@ def _actor_input(platform, keywords, since, max_items):
             'strictTokenFilter': False,
             'dateFrom': since.date().isoformat(),
             'forceSortNewForTimeFilteredRuns': True,
-            'maxPosts': per_query_limit,
+            # The Actor applies this to each query. Do not divide one small
+            # global allowance across all tracked entities.
+            'maxPosts': max_items,
             'maximize_coverage': False,
             'sentiment_analysis': False,
             'content_analysis': False,
@@ -491,7 +503,7 @@ async def apify_posts(client, platform, secret, keywords, since):
     api_key = str(secret.get('api_key', '')).strip()
     if not api_key:
         raise ProviderError('Missing Apify API token')
-    max_items = REDDIT_MAX_ITEMS if platform == 'reddit' else APIFY_MAX_ITEMS
+    max_items = config().social_fetch_max_per_query
     if platform == 'facebook':
         # The official Posts Actor accepts page/profile URLs, not keywords.
         # Discover matching public pages first, then fetch their latest posts.
@@ -507,10 +519,9 @@ async def apify_posts(client, platform, secret, keywords, since):
                 page_urls.append(candidate)
         if not page_urls:
             return []
-        per_page = max(1, max_items // len(page_urls))
         payload = {
             'startUrls': [{'url': url} for url in page_urls],
-            'resultsLimit': per_page,
+            'resultsLimit': max_items,
             'onlyPostsNewerThan': since.isoformat().replace('+00:00', 'Z'),
         }
     else:

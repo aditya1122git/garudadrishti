@@ -14,7 +14,7 @@ from app.models import now
 from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window, _telegram_link_label, _social_posts_with_fallback
 from app.sentiment import Classifier
 from app.connectors import NEWS_CHANNELS, NEWS_SEARCH_QUERIES, matches, apify_posts, google_news_posts, _actor_input, _apify_item, _approved_news_source, ProviderError, request
-from app.data365 import data365_posts, _data365_request_spec
+from app.data365 import data365_posts, _data365_request_spec, _run_data365_search
 
 
 def test_timezone_boundary():
@@ -330,6 +330,37 @@ async def test_data365_async_search_normalizes_x_posts():
     assert rows[0]['source_provider'] == 'data365'
 
 
+@pytest.mark.asyncio
+async def test_data365_exhausts_all_cursor_pages():
+    item_requests = []
+
+    def handler(req):
+        if req.method == 'POST':
+            return httpx.Response(202, json={'data': {'status': 'accepted'}})
+        if str(req.url.path).endswith('/update'):
+            return httpx.Response(200, json={'data': {'status': 'finished'}})
+        item_requests.append(req)
+        if 'cursor' not in req.url.params:
+            return httpx.Response(200, json={'data': {
+                'items': [{'id': 'page-1'}],
+                'page_info': {'has_next_page': True, 'cursor': 'next-page'},
+            }})
+        assert req.url.params['cursor'] == 'next-page'
+        return httpx.Response(200, json={'data': {
+            'items': [{'id': 'page-2'}],
+            'page_info': {'has_next_page': False, 'cursor': ''},
+        }})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        items = await _run_data365_search(
+            client, 'x', 'token', 'Samrat Choudhary', now() - timedelta(hours=1), 1000,
+        )
+
+    assert [item['id'] for item in items] == ['page-1', 'page-2']
+    assert len(item_requests) == 2
+    assert all(req.url.params['max_page_size'] == '500' for req in item_requests)
+
+
 @pytest.mark.parametrize('platform', ['instagram', 'reddit'])
 def test_data365_search_status_uses_update_endpoint(platform):
     create_url, _, status_url, _, _, _ = _data365_request_spec(
@@ -418,7 +449,7 @@ def test_reddit_actor_input_and_post_mapping():
     assert payload['scrapeComments'] is False and payload['includeNsfw'] is False
     assert payload['strictSearch'] is True and payload['strictTokenFilter'] is False
     assert payload['sort'] == 'new' and payload['timeframe'] == 'day'
-    assert payload['maxPosts'] == 5
+    assert payload['maxPosts'] == 10
 
     row = _apify_item('reddit', {
         'id': 't3_reddit1', 'dataType': 'post',

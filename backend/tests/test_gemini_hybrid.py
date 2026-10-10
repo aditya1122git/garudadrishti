@@ -251,6 +251,36 @@ async def test_youtube_classifies_title_only_never_description_or_comments():
 
 
 @pytest.mark.asyncio
+async def test_youtube_search_exhausts_all_result_pages():
+    search_tokens = []
+
+    def handler(req):
+        if req.url.path.endswith('/search'):
+            token = req.url.params.get('pageToken')
+            search_tokens.append(token)
+            video_id = 'first' if token is None else 'second'
+            payload = {'items': [{'id': {'videoId': video_id}}]}
+            if token is None:
+                payload['nextPageToken'] = 'page-2'
+            return httpx.Response(200, json=payload)
+        ids = req.url.params['id'].split(',')
+        return httpx.Response(200, json={'items': [{
+            'id': video_id,
+            'snippet': {'title': f'Samrat Choudhary {video_id}', 'channelTitle': 'News',
+                        'publishedAt': '2026-10-01T00:00:00Z'},
+            'statistics': {}, 'contentDetails': {'duration': 'PT5M'},
+        } for video_id in ids]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        rows = await youtube_posts(
+            client, {'api_key': 'test'}, ['Samrat Choudhary'], now() - timedelta(days=1),
+        )
+
+    assert search_tokens == [None, 'page-2']
+    assert {row['external_id'] for row in rows} == {'first', 'second'}
+
+
+@pytest.mark.asyncio
 async def test_youtube_rotates_to_backup_key_only_after_quota_exhaustion():
     keys = []
 

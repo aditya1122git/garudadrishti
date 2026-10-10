@@ -1,17 +1,16 @@
 """Data365 asynchronous fallback for public social post searches."""
 import asyncio
 import hashlib
-import math
 import re
 import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
 from .config import (
-    DATA365_MAX_ITEMS,
+    DATA365_PAGE_SIZE,
     DATA365_POLL_INTERVAL_SECONDS,
     DATA365_TASK_TIMEOUT_SECONDS,
-    REDDIT_MAX_ITEMS,
+    config,
 )
 from .connectors import (
     ProviderError,
@@ -57,7 +56,7 @@ def _data365_request_spec(platform, query, since, max_posts):
         return (
             root + '/update', {**identity, 'max_posts': max_posts, 'load_replies': 'false'},
             root + '/update', identity,
-            root + '/posts', {**identity, 'max_page_size': max_posts, 'order_by': 'date_desc'},
+            root + '/posts', {**identity, 'max_page_size': DATA365_PAGE_SIZE, 'order_by': 'date_desc'},
         )
     if platform == 'instagram':
         root = f'{DATA365_BASE_URL}/instagram/tag/{quote(query, safe="")}'
@@ -67,7 +66,7 @@ def _data365_request_spec(platform, query, since, max_posts):
                                'max_posts': max_posts, 'load_comments': 'false'},
             root + '/update', {},
             root + '/posts', {'sort_type': 'recent', 'from_date': from_date,
-                              'to_date': to_date, 'max_page_size': max_posts,
+                              'to_date': to_date, 'max_page_size': DATA365_PAGE_SIZE,
                               'order_by': 'date_desc'},
         )
     if platform == 'facebook':
@@ -77,7 +76,7 @@ def _data365_request_spec(platform, query, since, max_posts):
             root + '/update', {**identity, 'max_posts': max_posts, 'load_comments': 'false',
                                'load_reactors': 'false', 'load_shares': 'false'},
             root + '/update', identity,
-            root + '/posts', {**identity, 'max_page_size': max_posts, 'order_by': 'date_desc'},
+            root + '/posts', {**identity, 'max_page_size': DATA365_PAGE_SIZE, 'order_by': 'date_desc'},
         )
     if platform == 'reddit':
         root = f'{DATA365_BASE_URL}/reddit/search/post'
@@ -86,7 +85,7 @@ def _data365_request_spec(platform, query, since, max_posts):
             root + '/update', {**identity, 'from_date': from_date, 'max_posts': max_posts},
             root + '/update', identity,
             root + '/items', {**identity, 'from_date': from_date, 'to_date': to_date,
-                              'max_page_size': max_posts, 'order_by': 'date_desc'},
+                              'max_page_size': DATA365_PAGE_SIZE, 'order_by': 'date_desc'},
         )
     raise ProviderError(f'Data365 does not support platform {platform}')
 
@@ -112,6 +111,16 @@ def _data365_result_items(payload):
             if isinstance(value, list):
                 return value
     return []
+
+
+def _data365_next_cursor(payload):
+    """Return the documented cursor only while another cached page exists."""
+    if not isinstance(payload, dict) or not isinstance(payload.get('data'), dict):
+        return ''
+    page_info = payload['data'].get('page_info')
+    if not isinstance(page_info, dict) or not page_info.get('has_next_page'):
+        return ''
+    return str(page_info.get('cursor') or '').strip()
 
 
 def _data365_item(platform, item, keywords, since):
@@ -173,9 +182,21 @@ async def _run_data365_search(client, platform, token, query, since, max_posts):
         if time.monotonic() >= deadline:
             raise ProviderError('Data365 search task timed out; retry next scheduled run')
         await asyncio.sleep(DATA365_POLL_INTERVAL_SECONDS)
-    payload = await request(client, 'GET', items_url,
-                            params={**items_params, 'access_token': token}, timeout=30)
-    return _data365_result_items(payload)
+    items = []
+    cursor = ''
+    seen_cursors = set()
+    while True:
+        params = {**items_params, 'access_token': token}
+        if cursor:
+            params['cursor'] = cursor
+        payload = await request(client, 'GET', items_url, params=params, timeout=30)
+        items.extend(_data365_result_items(payload))
+        next_cursor = _data365_next_cursor(payload)
+        if not next_cursor or next_cursor in seen_cursors:
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return items
 
 
 async def data365_posts(client, platform, secret, keywords, since):
@@ -184,8 +205,7 @@ async def data365_posts(client, platform, secret, keywords, since):
     if not token:
         raise ProviderError('Missing Data365 API token')
     queries = _data365_queries(platform, keywords)
-    total_limit = REDDIT_MAX_ITEMS if platform == 'reddit' else DATA365_MAX_ITEMS
-    per_query = max(1, math.ceil(total_limit / len(queries)))
+    per_query = config().social_fetch_max_per_query
     # Facebook and Instagram use several focused searches. One provider task
     # must not discard usable rows returned by the other tasks.
     results = await asyncio.gather(*(
@@ -216,4 +236,4 @@ async def data365_posts(client, platform, secret, keywords, since):
         if isinstance(first, ProviderError):
             raise first
         raise ProviderError('Data365 search tasks failed') from None
-    return list(unique.values())[:total_limit]
+    return list(unique.values())

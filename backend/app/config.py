@@ -12,14 +12,12 @@ DEFAULT_APIFY_ACTORS = {
     'reddit': 'fatihtahta~reddit-scraper-search-fast',
 }
 APIFY_FACEBOOK_DISCOVERY_ACTOR = 'apify~facebook-search-scraper'
-APIFY_FACEBOOK_DISCOVERY_LIMIT = 12
-APIFY_MAX_ITEMS = 50
-REDDIT_MAX_ITEMS = 10
-APIFY_RUN_TIMEOUT_SECONDS = 240
+APIFY_FACEBOOK_DISCOVERY_LIMIT = 50
+APIFY_RUN_TIMEOUT_SECONDS = 900
 APIFY_SYNC_INTERVAL_HOURS = 4
-DATA365_MAX_ITEMS = 20
+DATA365_PAGE_SIZE = 500
 DATA365_POLL_INTERVAL_SECONDS = 5
-DATA365_TASK_TIMEOUT_SECONDS = 330
+DATA365_TASK_TIMEOUT_SECONDS = 900
 DEFAULT_AUTOMATION_START_HOUR = 6
 DEFAULT_AUTOMATION_END_HOUR = 22
 
@@ -51,6 +49,9 @@ class Config(BaseSettings):
     apify_api_token: str = ''
     data365_api_token: str = ''
     data365_api_key: str = ''  # Backward-compatible deployment variable name.
+    # Provider jobs need a finite collection ceiling. This is per query (not a
+    # shared per-run cap); every returned Data365 page is read afterwards.
+    social_fetch_max_per_query: int = 1000
     youtube_api_key: str = ''
     youtube_backup_api_key: str = ''
     youtube_initial_lookback_days: int = 7
@@ -96,6 +97,8 @@ class Config(BaseSettings):
             raise ValueError('Invalid ENABLED_PLATFORMS')
         if self.youtube_sync_interval_minutes != 15:
             raise ValueError('YouTube sync interval must remain 15 minutes')
+        if not 50 <= self.social_fetch_max_per_query <= 10_000:
+            raise ValueError('SOCIAL_FETCH_MAX_PER_QUERY must be 50..10000')
         if self.hf_device not in ('cpu', 'cuda', 'mps'):
             raise ValueError('HF_DEVICE must be cpu, cuda, or mps')
         if not all(value.strip() for value in (
