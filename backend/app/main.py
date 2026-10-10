@@ -156,14 +156,15 @@ async def lifespan(app):
             '$setOnInsert': dict(status='pending', last_synced_at=None),
         }, upsert=True)
     for p in ['facebook', 'instagram', 'x', 'reddit']:
-        if ((c.apify_api_token or c.data365_api_token) and not c.seed_mock_data
+        data365_token = c.data365_api_token.strip() or c.data365_api_key.strip()
+        if ((c.apify_api_token.strip() or data365_token) and not c.seed_mock_data
                 and p in c.enabled_platforms.split(',')):
             secret = {}
-            if c.apify_api_token:
-                secret['api_key'] = c.apify_api_token
-            if c.data365_api_token:
-                secret['data365_api_token'] = c.data365_api_token
-            mode = 'hybrid' if len(secret) == 2 else 'apify' if c.apify_api_token else 'data365'
+            if c.apify_api_token.strip():
+                secret['api_key'] = c.apify_api_token.strip()
+            if data365_token:
+                secret['data365_api_token'] = data365_token
+            mode = 'hybrid' if len(secret) == 2 else 'apify' if c.apify_api_token.strip() else 'data365'
             await db.platform_credentials.update_one({'platform': p}, {
                 '$set': dict(platform=p, mode=mode, encrypted_api_key=encrypt(secret)),
                 '$setOnInsert': dict(status='pending', last_synced_at=None),

@@ -243,7 +243,9 @@ async def _social_posts_with_fallback(client, platform, secret, keywords, since)
             raise RuntimeError(f'Data365: {data365_error}') from None
 
     if apify_error:
-        raise RuntimeError(f'Apify: {apify_error}') from None
+        raise RuntimeError(
+            f'Apify: {apify_error}; Data365 token is not configured in the API container'
+        ) from None
     return [], 'apify', None
 
 async def scheduled_sync(db, client, platforms):

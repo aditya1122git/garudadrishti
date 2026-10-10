@@ -50,6 +50,7 @@ class Config(BaseSettings):
     enabled_platforms: str = 'facebook,instagram,x,youtube,news,reddit'
     apify_api_token: str = ''
     data365_api_token: str = ''
+    data365_api_key: str = ''  # Backward-compatible deployment variable name.
     youtube_api_key: str = ''
     youtube_backup_api_key: str = ''
     youtube_initial_lookback_days: int = 7

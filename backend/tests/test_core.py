@@ -37,6 +37,15 @@ def test_bootstrap_credentials_are_optional_for_existing_database():
     assert settings.bootstrap_email == '' and settings.bootstrap_password == ''
 
 
+def test_legacy_data365_api_key_environment_name_is_supported():
+    settings = Config(
+        _env_file=None, seed_mock_data=False, demo_in_memory=False,
+        jwt_secret='x' * 32, encryption_key=Fernet.generate_key().decode(),
+        data365_api_token='', data365_api_key='legacy-data365-token',
+    )
+    assert settings.data365_api_key == 'legacy-data365-token'
+
+
 def test_encryption():
     secret = {'api_key': 'private-key-value'}
     ciphertext = encrypt(secret)
