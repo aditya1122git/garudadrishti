@@ -1,6 +1,7 @@
 import asyncio
 import json
 import random
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
@@ -150,11 +151,23 @@ def _telegram_link_label(platform: object) -> str:
     }.get(key, 'View original post')
 
 
+def _telegram_recipients(settings_obj) -> list[str]:
+    """Return unique Telegram targets from a comma/space-separated env value."""
+    values = (str(getattr(settings_obj, 'telegram_chat_id', '') or ''),)
+    recipients = []
+    for value in values:
+        for chat_id in re.split(r'[,;\s]+', value.strip()):
+            if chat_id and chat_id not in recipients:
+                recipients.append(chat_id)
+    return recipients
+
+
 async def notify_negative_posts(db, client):
     """Send one idempotent Telegram message for every newly classified negative post."""
     c = config()
     prefs = await settings(db)
-    if (c.seed_mock_data or not c.telegram_bot_token or not c.telegram_chat_id
+    recipients = _telegram_recipients(c)
+    if (c.seed_mock_data or not c.telegram_bot_token or not recipients
             or not within_automation_window(
                 start_hour=prefs.get('automation_start_hour', DEFAULT_AUTOMATION_START_HOUR),
                 end_hour=prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR))):
@@ -195,22 +208,34 @@ async def notify_negative_posts(db, client):
                    f'<b>Confidence:</b> {confidence}%\n\n'
                    f'{html_escape(content)}\n\n'
                    f'<a href="{html_escape(url, quote=True)}">{link_label}</a>')
-        try:
-            response = await request(client, 'POST',
-                f'https://api.telegram.org/bot{c.telegram_bot_token}/sendMessage',
-                json={'chat_id': c.telegram_chat_id, 'text': message,
-                      'parse_mode': 'HTML', 'disable_web_page_preview': True})
-            if not isinstance(response, dict) or not response.get('ok'):
-                raise RuntimeError('Telegram rejected the message')
+        already_sent = set((post_row.get('telegram_notification') or {}).get('sent_chat_ids') or [])
+        failed = False
+        for chat_id in recipients:
+            if chat_id in already_sent:
+                continue
+            try:
+                response = await request(client, 'POST',
+                    f'https://api.telegram.org/bot{c.telegram_bot_token}/sendMessage',
+                    json={'chat_id': chat_id, 'text': message,
+                          'parse_mode': 'HTML', 'disable_web_page_preview': True})
+                if not isinstance(response, dict) or not response.get('ok'):
+                    raise RuntimeError('Telegram rejected the message')
+                already_sent.add(chat_id)
+                await db.posts.update_one({'_id': post_row['_id']}, {
+                    '$addToSet': {'telegram_notification.sent_chat_ids': chat_id}})
+            except Exception:
+                failed = True
+        if not failed and all(chat_id in already_sent for chat_id in recipients):
             await db.posts.update_one({'_id': post_row['_id']}, {
                 '$set': {'telegram_notification.status': 'sent',
                          'telegram_notification.sent_at': now()},
                 '$unset': {'telegram_notification.error': '',
                            'telegram_notification.lease_until': ''}})
-        except Exception:
+        else:
             await db.posts.update_one({'_id': post_row['_id']}, {
                 '$set': {'telegram_notification.status': 'failed',
-                         'telegram_notification.error': 'Delivery failed; retry scheduled'}})
+                         'telegram_notification.error': 'Delivery to one or more chats failed; retry scheduled'},
+                '$unset': {'telegram_notification.lease_until': ''}})
 
 _sync_lock = asyncio.Lock()
 

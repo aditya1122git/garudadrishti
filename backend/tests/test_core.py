@@ -11,7 +11,7 @@ from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
 from app.config import Config
 from app.models import now
-from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window, _telegram_link_label, _social_posts, _classification_text
+from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window, _telegram_link_label, _telegram_recipients, _social_posts, _classification_text
 from app.sentiment import Classifier
 from app.connectors import NEWS_CHANNELS, NEWS_SEARCH_QUERIES, matches, apify_posts, google_news_posts, _actor_input, _apify_item, _approved_news_source, ProviderError, request
 from app.media_analysis import extract_media_assets, enrich_media_posts
@@ -222,6 +222,42 @@ async def test_negative_post_telegram_alert_is_idempotent(monkeypatch):
     assert '>View on Facebook</a>' in payload['text']
     assert 'Open post:' not in payload['text']
     assert 'https://example.org/post/negative-1' in payload['text']
+
+
+def test_telegram_recipients_are_split_and_deduplicated():
+    class Settings:
+        telegram_chat_id = '-1001, -1002; -1002 12345'
+    assert _telegram_recipients(Settings()) == ['-1001', '-1002', '12345']
+
+
+@pytest.mark.asyncio
+async def test_negative_post_alert_is_sent_to_every_configured_chat(monkeypatch):
+    db = AsyncMongoMockClient(tz_aware=True).test
+    await db.posts.insert_one({
+        'platform': 'x', 'external_id': 'negative-many', 'author': 'Reporter',
+        'content': 'Negative report', 'url': 'https://x.com/example/status/1',
+        'published_at': now(), 'demo': False,
+        'sentiment': {'label': 'negative', 'confidence': .9},
+        'telegram_notification': {'status': 'pending'},
+    })
+    class Settings:
+        seed_mock_data = False
+        telegram_bot_token = '123456:test_bot_token_value_long_enough'
+        telegram_chat_id = '-1001,-1002,12345,-1001'
+        reporting_timezone = 'Asia/Kolkata'
+    monkeypatch.setattr('app.services.config', lambda: Settings())
+    monkeypatch.setattr('app.services.within_automation_window', lambda *args, **kwargs: True)
+    recipients = []
+    def handler(req):
+        recipients.append(json.loads(req.content)['chat_id'])
+        return httpx.Response(200, json={'ok': True, 'result': {'message_id': 1}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await notify_negative_posts(db, client)
+        await notify_negative_posts(db, client)
+    stored = await db.posts.find_one({'external_id': 'negative-many'})
+    assert recipients == ['-1001', '-1002', '12345']
+    assert stored['telegram_notification']['status'] == 'sent'
+    assert set(stored['telegram_notification']['sent_chat_ids']) == {'-1001', '-1002', '12345'}
 
 
 @pytest.mark.asyncio
