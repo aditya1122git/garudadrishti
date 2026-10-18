@@ -12,7 +12,9 @@ DEFAULT_APIFY_ACTORS = {
     'reddit': 'fatihtahta~reddit-scraper-search-fast',
 }
 APIFY_FACEBOOK_DISCOVERY_ACTOR = 'apify~facebook-search-scraper'
-APIFY_FACEBOOK_DISCOVERY_LIMIT = 50
+APIFY_FACEBOOK_DISCOVERY_LIMIT = 12
+APIFY_MAX_ITEMS = 50
+REDDIT_MAX_ITEMS = 10
 APIFY_RUN_TIMEOUT_SECONDS = 900
 APIFY_SYNC_INTERVAL_HOURS = 4
 DEFAULT_AUTOMATION_START_HOUR = 6
@@ -49,9 +51,6 @@ class Config(BaseSettings):
     gemini_concurrency: int = 2
     enabled_platforms: str = 'facebook,instagram,x,youtube,news,reddit'
     apify_api_token: str = ''
-    # Provider jobs need a finite collection ceiling. This is per query rather
-    # than a small shared per-run cap.
-    social_fetch_max_per_query: int = 1000
     youtube_api_key: str = ''
     youtube_backup_api_key: str = ''
     youtube_initial_lookback_days: int = 7
@@ -103,8 +102,6 @@ class Config(BaseSettings):
             raise ValueError('Invalid ENABLED_PLATFORMS')
         if self.youtube_sync_interval_minutes != 15:
             raise ValueError('YouTube sync interval must remain 15 minutes')
-        if not 50 <= self.social_fetch_max_per_query <= 10_000:
-            raise ValueError('SOCIAL_FETCH_MAX_PER_QUERY must be 50..10000')
         if self.hf_device not in ('cpu', 'cuda', 'mps'):
             raise ValueError('HF_DEVICE must be cpu, cuda, or mps')
         if not all(value.strip() for value in (

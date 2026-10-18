@@ -70,6 +70,7 @@ def test_token_only_apify_inputs_are_platform_specific():
         'https://www.instagram.com/explore/tags/BiharBJP/',
     ]
     assert instagram['onlyPostsNewerThan'].endswith('Z')
+    assert instagram['resultsLimit'] == 10
     x_input = _actor_input('x', keywords, since, 20)
     assert x_input['sort'] == 'Latest + Top'
     assert x_input['searchTerms'] == [
@@ -407,7 +408,7 @@ def test_reddit_actor_input_and_post_mapping():
     assert payload['scrapeComments'] is False and payload['includeNsfw'] is False
     assert payload['strictSearch'] is True and payload['strictTokenFilter'] is False
     assert payload['sort'] == 'new' and payload['timeframe'] == 'day'
-    assert payload['maxPosts'] == 10
+    assert payload['maxPosts'] == 5
 
     row = _apify_item('reddit', {
         'id': 't3_reddit1', 'dataType': 'post',

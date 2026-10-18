@@ -16,8 +16,10 @@ import httpx
 from .config import (
     APIFY_FACEBOOK_DISCOVERY_ACTOR,
     APIFY_FACEBOOK_DISCOVERY_LIMIT,
+    APIFY_MAX_ITEMS,
     APIFY_RUN_TIMEOUT_SECONDS,
     DEFAULT_APIFY_ACTORS,
+    REDDIT_MAX_ITEMS,
     config,
 )
 from .media_analysis import enrich_media_posts, extract_media_assets
@@ -383,13 +385,17 @@ def _actor_input(platform, keywords, since, max_items):
             tag = re.sub(r'[^\w]+', '', keyword.lstrip('#'), flags=re.UNICODE)
             if tag and tag.casefold() not in {value.casefold() for value in searches}:
                 searches.append(tag)
+        if not searches:
+            raise ProviderError('No Instagram hashtag search terms are active')
         return {
             'directUrls': [
                 f'https://www.instagram.com/explore/tags/{quote(tag, safe="")}/'
                 for tag in searches
             ],
             'resultsType': 'posts',
-            'resultsLimit': max_items,
+            # Instagram applies resultsLimit per hashtag URL. Divide the
+            # run-wide allowance so ten tags cannot silently cost 10x more.
+            'resultsLimit': max(1, max_items // len(searches)),
             'onlyPostsNewerThan': since_iso,
         }
     if platform == 'x':
@@ -429,9 +435,7 @@ def _actor_input(platform, keywords, since, max_items):
             'strictTokenFilter': False,
             'dateFrom': since.date().isoformat(),
             'forceSortNewForTimeFilteredRuns': True,
-            # The Actor applies this to each query. Do not divide one small
-            # global allowance across all tracked entities.
-            'maxPosts': max_items,
+            'maxPosts': max(1, math.ceil(max_items / len(active_queries))),
             'maximize_coverage': False,
             'sentiment_analysis': False,
             'content_analysis': False,
@@ -510,7 +514,7 @@ async def apify_posts(client, platform, secret, keywords, since, media_skip_ids=
     api_key = str(secret.get('api_key', '')).strip()
     if not api_key:
         raise ProviderError('Missing Apify API token')
-    max_items = config().social_fetch_max_per_query
+    max_items = REDDIT_MAX_ITEMS if platform == 'reddit' else APIFY_MAX_ITEMS
     if platform == 'facebook':
         # The official Posts Actor accepts page/profile URLs, not keywords.
         # Discover matching public pages first, then fetch their latest posts.
@@ -528,9 +532,10 @@ async def apify_posts(client, platform, secret, keywords, since, media_skip_ids=
                 page_urls.append(candidate)
         if not page_urls:
             return []
+        per_page = max(1, max_items // len(page_urls))
         payload = {
             'startUrls': [{'url': url} for url in page_urls],
-            'resultsLimit': max_items,
+            'resultsLimit': per_page,
             'onlyPostsNewerThan': since.isoformat().replace('+00:00', 'Z'),
         }
     else:
