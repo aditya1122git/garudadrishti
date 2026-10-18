@@ -292,7 +292,10 @@ async def sync(db, client, platforms=None):
                             since = now() - timedelta(days=7)
                         else:
                             since = c.get('last_synced_at') or now() - timedelta(hours=24)
-                        since -= timedelta(minutes=5)  # deliberate overlap; compound unique index deduplicates
+                        # A small cursor overlap protects against clock/indexing
+                        # lag without repeatedly paying for five minutes of
+                        # already-seen social results on every scheduled run.
+                        since -= timedelta(minutes=5 if p in ('youtube', 'news') else 1)
                         if p == 'youtube':
                             rows = await youtube_posts(client, secret, keywords, since)
                         elif p == 'news':

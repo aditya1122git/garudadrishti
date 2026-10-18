@@ -72,7 +72,7 @@ def test_token_only_apify_inputs_are_platform_specific():
     assert instagram['onlyPostsNewerThan'].endswith('Z')
     assert instagram['resultsLimit'] == 10
     x_input = _actor_input('x', keywords, since, 20)
-    assert x_input['sort'] == 'Latest + Top'
+    assert x_input['sort'] == 'Latest'
     assert x_input['searchTerms'] == [
         f'("Samrat Choudhary" OR "Samrat Chaudhary" OR "CM Samrat" OR '
         f'#SamratChoudhary OR #SamratChaudhary OR #CMSamrat) since:{since.date().isoformat()}',
@@ -170,13 +170,16 @@ def test_media_only_apify_item_survives_until_ocr_relevance_check():
 @pytest.mark.parametrize('source', [
     'Dainik Bhaskar', 'jagran.com', 'tv9hindi.com', 'prabhatkhabar.com',
     'Hindustan', 'ETV Bharat', 'Navbharat Times',
+    'Aaj Tak', 'India Today', 'NDTV India', 'Republic Bharat', 'CNN-News18',
+    'ANI', 'Press Trust of India', 'Amar Ujala', 'Hindustan Times',
+    'The Indian Express', 'The Hindu', 'The Economic Times', 'Kashish News',
 ])
 def test_expanded_bihar_news_sources_are_approved(source):
     assert _approved_news_source(source)
 
 
 def test_similarly_named_unapproved_source_is_rejected():
-    assert not _approved_news_source('Hindustan Times')
+    assert not _approved_news_source('Hindustan Motors Blog')
 
 
 @pytest.mark.asyncio
@@ -369,16 +372,23 @@ async def test_apify_actor_normalizes_and_filters_items():
              'postUrl': 'https://example.org/post/42', 'pageName': 'Reporter', 'reactionCount': '12'},
             {'postId': '43', 'text': 'Unrelated post', 'createdAt': now().isoformat()},
         ])
+    secret = {'api_key': 'apify-token-value'}
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        rows = await apify_posts(client, 'facebook', {'api_key': 'apify-token-value'},
+        rows = await apify_posts(client, 'facebook', secret,
+            ['Bihar BJP'], now() - timedelta(hours=1))
+        cached_rows = await apify_posts(client, 'facebook', secret,
             ['Bihar BJP'], now() - timedelta(hours=1))
     assert len(rows) == 1 and rows[0]['external_id'] == '42'
+    assert len(cached_rows) == 1 and cached_rows[0]['external_id'] == '42'
     assert rows[0]['engagement']['likes'] == 12 and rows[0]['source_provider'] == 'apify'
     assert requests[0].headers['Authorization'] == 'Bearer apify-token-value'
     assert '/acts/apify~facebook-search-scraper/run-sync-get-dataset-items' in str(requests[0].url)
     assert json.loads(requests[0].content)['locations'] == ['India']
     assert '/acts/apify~facebook-posts-scraper/run-sync-get-dataset-items' in str(requests[1].url)
     assert json.loads(requests[1].content)['startUrls'] == [{'url': 'https://www.facebook.com/BJP4Bihar'}]
+    assert sum('facebook-search-scraper' in str(req.url) for req in requests) == 1
+    assert sum('facebook-posts-scraper' in str(req.url) for req in requests) == 2
+    assert secret['facebook_page_cache'] == ['https://www.facebook.com/BJP4Bihar']
 
 
 @pytest.mark.asyncio
@@ -426,9 +436,9 @@ async def test_google_news_rss_input_and_output_mapping():
           </item></channel></rss>''')
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         rows = await google_news_posts(client, ['Samrat Choudhary', 'Bihar BJP'], now() - timedelta(days=1))
-    assert len(captured) == len(NEWS_SEARCH_QUERIES)
+    assert len(captured) == len(NEWS_SEARCH_QUERIES) * 2
     assert all(req.url.host == 'news.google.com' for req in captured)
-    assert all(req.url.params['ceid'] == 'IN:hi' for req in captured)
+    assert {req.url.params['ceid'] for req in captured} == {'IN:hi', 'IN:en'}
     assert all(not any(channel in req.url.params['q'] for channel in NEWS_CHANNELS)
                for req in captured)
     assert rows[0]['author'] == 'News18 Bihar Jharkhand'

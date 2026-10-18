@@ -218,6 +218,8 @@ async def test_youtube_classifies_title_only_never_description_or_comments():
         paths.append(req.url.path)
         if req.url.path.endswith('/search'):
             assert req.url.params['q'] == '|'.join(YOUTUBE_SEARCH_TERMS)
+            assert req.url.params['regionCode'] == 'IN'
+            assert 'location' not in req.url.params and 'locationRadius' not in req.url.params
             return httpx.Response(200, json={'items': [
                 {'id': {'videoId': 'abc'}}, {'id': {'videoId': 'description-only'}},
             ]})
