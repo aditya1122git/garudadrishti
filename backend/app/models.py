@@ -34,6 +34,11 @@ class Post(Document):
     external_id: str
     author: str
     content: str
+    caption: str = ''
+    media_assets: list[dict[str, str]] = Field(default_factory=list)
+    media_text: str = ''
+    media_analysis: dict[str, Any] | None = None
+    media_analysis_version: int | None = None
     url: str
     published_at: datetime
     engagement: Engagement = Field(default_factory=Engagement)
@@ -87,7 +92,7 @@ class TrackedKeyword(Document):
 class PlatformCredential(Document):
     schema_version: int = 1
     platform: str
-    mode: Literal['official', 'apify', 'data365', 'hybrid'] = 'official'
+    mode: Literal['official', 'apify'] = 'official'
     encrypted_api_key: str
     status: str = 'pending'
     last_synced_at: datetime | None = None

@@ -155,24 +155,33 @@ async def lifespan(app):
                          })),
             '$setOnInsert': dict(status='pending', last_synced_at=None),
         }, upsert=True)
+    social_token_changed = False
     for p in ['facebook', 'instagram', 'x', 'reddit']:
-        data365_token = c.data365_api_token.strip() or c.data365_api_key.strip()
-        if ((c.apify_api_token.strip() or data365_token) and not c.seed_mock_data
+        if (c.apify_api_token.strip() and not c.seed_mock_data
                 and p in c.enabled_platforms.split(',')):
-            secret = {}
-            if c.apify_api_token.strip():
-                secret['api_key'] = c.apify_api_token.strip()
-            if data365_token:
-                secret['data365_api_token'] = data365_token
-            mode = 'hybrid' if len(secret) == 2 else 'apify' if c.apify_api_token.strip() else 'data365'
+            existing = await db.platform_credentials.find_one({'platform': p})
+            try:
+                previous_token = decrypt(existing['encrypted_api_key']).get('api_key', '') if existing else ''
+            except Exception:
+                previous_token = ''
+            token_changed = previous_token != c.apify_api_token.strip()
+            social_token_changed = social_token_changed or token_changed
+            set_fields = dict(platform=p, mode='apify', encrypted_api_key=encrypt({
+                'api_key': c.apify_api_token.strip(),
+            }))
+            if token_changed:
+                set_fields.update(status='pending', error=None)
+            insert_fields = {'last_synced_at': None}
+            if not token_changed:
+                insert_fields['status'] = 'pending'
             await db.platform_credentials.update_one({'platform': p}, {
-                '$set': dict(platform=p, mode=mode, encrypted_api_key=encrypt(secret)),
-                '$setOnInsert': dict(status='pending', last_synced_at=None),
+                '$set': set_fields,
+                '$setOnInsert': insert_fields,
+                '$unset': {'last_provider': '', 'fallback_reason': '',
+                           **({'last_attempt_at': ''} if token_changed else {})},
             }, upsert=True)
         elif not c.seed_mock_data:
-            await db.platform_credentials.delete_one({
-                'platform': p, 'mode': {'$nin': ['apify', 'data365', 'hybrid']},
-            })
+            await db.platform_credentials.delete_one({'platform': p})
     if not c.seed_mock_data and 'news' in c.enabled_platforms.split(','):
         # News is always credential-free Google RSS. Repair any stale
         # credential/error left by older deployments before the next run.
@@ -215,6 +224,12 @@ async def lifespan(app):
             prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR),
         )
         scheduler.start()
+        if social_token_changed:
+            social_platforms = [p for p in ['facebook', 'instagram', 'x', 'reddit']
+                                if p in c.enabled_platforms.split(',')]
+            app.state.manual_sync_task = asyncio.create_task(
+                sync(db, app.state.http, platforms=social_platforms),
+            )
     yield
     if scheduler.running:
         scheduler.shutdown(wait=False)

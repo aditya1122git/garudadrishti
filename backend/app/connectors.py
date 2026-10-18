@@ -20,6 +20,7 @@ from .config import (
     DEFAULT_APIFY_ACTORS,
     config,
 )
+from .media_analysis import enrich_media_posts, extract_media_assets
 
 NEWS_CHANNELS = (
     'News18', 'Zee Bihar', 'ABP Bihar', 'News State', 'Sahara Samay',
@@ -449,6 +450,7 @@ def _apify_item(platform, item, keywords, since):
     # Social Actors expose the post body in `text`/`caption`; replies and
     # comments are intentionally excluded.
     content = f'{title}\n{text}'.strip() if platform == 'reddit' else text or title
+    media_assets = extract_media_assets(item)
     author_handle = str(_first(
         item, 'author.userName', 'author.username', 'user.userName', 'user.username',
         'ownerUsername', 'username', default='',
@@ -457,7 +459,11 @@ def _apify_item(platform, item, keywords, since):
         content, [*keywords, *X_MATCH_ALIASES] if platform == 'x' else keywords,
     ) if content else False
     official_x_post = platform == 'x' and author_handle in X_OFFICIAL_HANDLES
-    if not content or not (content_matches or official_x_post):
+    # Media-only political posts must survive normalization long enough for
+    # OCR/transcription to determine whether they match the tracked entities.
+    if not content and not media_assets:
+        return None
+    if not (content_matches or official_x_post or media_assets):
         return None
     published = _timestamp(_first(item, 'publishedAt', 'published_at', 'createdAt', 'created_at', 'created_utc',
                                   'takenAt', 'date_utc', 'timestamp', 'date', 'time', 'timeCreated',
@@ -480,7 +486,8 @@ def _apify_item(platform, item, keywords, since):
     row = post(platform, external_id, author, content, url, published.isoformat(), engagement)
     row.update(source_provider='apify', content_scope=(
         'reddit-public-post-v1' if platform == 'reddit' else 'apify-public-post-v1'
-    ))
+    ), caption=content, media_assets=media_assets,
+        _caption_keyword_match=content_matches, _official_x_post=official_x_post)
     return row
 
 
@@ -498,7 +505,7 @@ async def _run_apify_actor(client, actor_id, api_key, payload, limit):
     return data
 
 
-async def apify_posts(client, platform, secret, keywords, since):
+async def apify_posts(client, platform, secret, keywords, since, media_skip_ids=None):
     """Run the configured Apify Actors and normalize public social posts."""
     api_key = str(secret.get('api_key', '')).strip()
     if not api_key:
@@ -509,7 +516,9 @@ async def apify_posts(client, platform, secret, keywords, since):
         # Discover matching public pages first, then fetch their latest posts.
         discovery = await _run_apify_actor(client, APIFY_FACEBOOK_DISCOVERY_ACTOR, api_key, {
             'categories': keywords[:10],
-            'locations': ['Bihar'],
+            # Discover relevant public pages across India. Post bodies are
+            # still filtered against the tracked Bihar-focused keywords.
+            'locations': ['India'],
             'resultsLimit': APIFY_FACEBOOK_DISCOVERY_LIMIT,
         }, APIFY_FACEBOOK_DISCOVERY_LIMIT)
         page_urls = []
@@ -529,7 +538,7 @@ async def apify_posts(client, platform, secret, keywords, since):
     data = await _run_apify_actor(
         client, DEFAULT_APIFY_ACTORS[platform], api_key, payload, max_items,
     )
-    rows = []
+    candidates = []
     invalid = 0
     for item in data:
         try:
@@ -538,7 +547,19 @@ async def apify_posts(client, platform, secret, keywords, since):
             invalid += 1
             continue
         if row:
-            rows.append(row)
+            candidates.append(row)
     if data and invalid == len(data):
         raise ProviderError('Apify output has no usable publication timestamps; check Actor mapping')
+    media_skip_ids = set(media_skip_ids or ())
+    candidates = [row for row in candidates
+                  if not (row.get('media_assets') and row['external_id'] in media_skip_ids)]
+    candidates = await enrich_media_posts(client, config(), candidates)
+    rows = []
+    relevance_keywords = [*keywords, *X_MATCH_ALIASES] if platform == 'x' else keywords
+    for row in candidates:
+        media_match = matches(row.get('media_text', ''), relevance_keywords)
+        if not (row.pop('_caption_keyword_match', False)
+                or row.pop('_official_x_post', False) or media_match):
+            continue
+        rows.append(row)
     return rows

@@ -3,18 +3,18 @@ os.environ['SEED_MOCK_DATA'] = 'true'
 os.environ['DEMO_IN_MEMORY'] = 'true'
 os.environ['SCHEDULER_ENABLED'] = 'false'
 import json
+from types import SimpleNamespace
 from datetime import timedelta
 import pytest
 import httpx
-import app.data365 as data365_module
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
 from app.config import Config
 from app.models import now
-from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window, _telegram_link_label, _social_posts_with_fallback
+from app.services import bounds, today, create_alert, statuses, encrypt, decrypt, notify_negative_posts, within_automation_window, _telegram_link_label, _social_posts, _classification_text
 from app.sentiment import Classifier
 from app.connectors import NEWS_CHANNELS, NEWS_SEARCH_QUERIES, matches, apify_posts, google_news_posts, _actor_input, _apify_item, _approved_news_source, ProviderError, request
-from app.data365 import data365_posts, _data365_request_spec, _run_data365_search
+from app.media_analysis import extract_media_assets, enrich_media_posts
 
 
 def test_timezone_boundary():
@@ -37,20 +37,21 @@ def test_bootstrap_credentials_are_optional_for_existing_database():
     assert settings.bootstrap_email == '' and settings.bootstrap_password == ''
 
 
-def test_legacy_data365_api_key_environment_name_is_supported():
-    settings = Config(
-        _env_file=None, seed_mock_data=False, demo_in_memory=False,
-        jwt_secret='x' * 32, encryption_key=Fernet.generate_key().decode(),
-        data365_api_token='', data365_api_key='legacy-data365-token',
-    )
-    assert settings.data365_api_key == 'legacy-data365-token'
-
-
 def test_encryption():
     secret = {'api_key': 'private-key-value'}
     ciphertext = encrypt(secret)
     assert 'private-key' not in ciphertext
     assert decrypt(ciphertext) == secret
+
+
+def test_media_text_is_prioritized_for_sentiment_classification():
+    text = _classification_text({
+        'caption': 'Generic update',
+        'content': 'Generic update',
+        'media_text': 'Bihar Government failed to deliver the promised work.',
+    })
+    assert text.startswith('[MEDIA SPEECH/OCR]\nBihar Government failed')
+    assert text.endswith('[CAPTION]\nGeneric update')
 
 
 def test_keyword_matching_hindi_and_name_variants():
@@ -108,6 +109,61 @@ def test_x_actor_accepts_target_aliases_and_official_account_posts():
     }
     assert _apify_item('x', alias_item, ['Samrat Choudhary'], since)['external_id'] == 'alias'
     assert _apify_item('x', official_item, ['Samrat Choudhary'], since)['external_id'] == 'official'
+
+
+def test_apify_media_urls_are_extracted_without_post_links():
+    assets = extract_media_assets({
+        'postUrl': 'https://www.instagram.com/p/example/',
+        'displayUrl': 'https://scontent-del1-1.cdninstagram.com/poster.jpg',
+        'videoUrl': 'https://scontent-del1-1.cdninstagram.com/reel.mp4',
+        'extendedEntities': {'media': [{
+            'media_url_https': 'https://pbs.twimg.com/media/example.jpg',
+        }]},
+        'redditVideo': 'https://v.redd.it/example',
+    })
+    assert assets == [
+        {'url': 'https://scontent-del1-1.cdninstagram.com/poster.jpg', 'kind': 'image'},
+        {'url': 'https://scontent-del1-1.cdninstagram.com/reel.mp4', 'kind': 'video'},
+        {'url': 'https://pbs.twimg.com/media/example.jpg', 'kind': 'image'},
+        {'url': 'https://v.redd.it/example', 'kind': 'video'},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_media_analysis_combines_speech_ocr_and_visual_context(monkeypatch):
+    async def fake_analysis(client, settings, asset):
+        return {
+            'speech_transcript': 'Samrat Choudhary addressed the public meeting.',
+            'on_screen_text': 'Bihar BJP development programme',
+            'visual_context': 'A political event poster is visible.',
+            'language': 'Hindi and English',
+        }
+
+    monkeypatch.setattr('app.media_analysis.analyze_media_asset', fake_analysis)
+    settings = SimpleNamespace(
+        media_analysis_enabled=True, gemini_api_key='test',
+        media_analysis_concurrency=2, media_max_assets_per_post=3,
+    )
+    rows = await enrich_media_posts(None, settings, [{
+        'caption': 'Meeting update', 'content': 'Meeting update',
+        'media_assets': [{'url': 'https://pbs.twimg.com/media/example.jpg', 'kind': 'image'}],
+    }])
+    assert 'Samrat Choudhary addressed the public meeting.' in rows[0]['content']
+    assert 'Bihar BJP development programme' in rows[0]['media_text']
+    assert rows[0]['media_analysis']['status'] == 'complete'
+    assert rows[0]['media_analysis_version'] == 1
+
+
+def test_media_only_apify_item_survives_until_ocr_relevance_check():
+    row = _apify_item('instagram', {
+        'id': 'media-only', 'caption': '', 'takenAt': now().isoformat(),
+        'url': 'https://www.instagram.com/p/media-only/',
+        'displayUrl': 'https://scontent-del1-1.cdninstagram.com/media-only.jpg',
+        'ownerUsername': 'public_page',
+    }, ['Samrat Choudhary'], now() - timedelta(hours=1))
+    assert row['external_id'] == 'media-only'
+    assert row['content'] == ''
+    assert row['media_assets'][0]['kind'] == 'image'
 
 
 @pytest.mark.parametrize('source', [
@@ -283,6 +339,7 @@ async def test_apify_actor_normalizes_and_filters_items():
     assert rows[0]['engagement']['likes'] == 12 and rows[0]['source_provider'] == 'apify'
     assert requests[0].headers['Authorization'] == 'Bearer apify-token-value'
     assert '/acts/apify~facebook-search-scraper/run-sync-get-dataset-items' in str(requests[0].url)
+    assert json.loads(requests[0].content)['locations'] == ['India']
     assert '/acts/apify~facebook-posts-scraper/run-sync-get-dataset-items' in str(requests[1].url)
     assert json.loads(requests[1].content)['startUrls'] == [{'url': 'https://www.facebook.com/BJP4Bihar'}]
 
@@ -304,115 +361,16 @@ async def test_apify_normalizes_serialized_facebook_author():
 
 
 @pytest.mark.asyncio
-async def test_data365_async_search_normalizes_x_posts():
-    requests = []
+async def test_social_provider_uses_only_apify(monkeypatch):
+    async def working_apify(*args, **kwargs):
+        return [{'external_id': 'apify-1'}]
 
-    def handler(req):
-        requests.append(req)
-        assert req.url.params['access_token'] == 'data365-token-value'
-        if req.method == 'POST':
-            return httpx.Response(202, json={'status': 'accepted', 'data': {'task_id': 'task-1'}})
-        if str(req.url.path).endswith('/update'):
-            return httpx.Response(200, json={'status': 'ok', 'data': {'status': 'finished'}})
-        return httpx.Response(200, json={'status': 'ok', 'data': {'items': [{
-            'id': '19001', 'text': 'Samrat Choudhary reviews Bihar development work',
-            'created_time': now().isoformat(), 'author_username': 'reporter_bihar',
-            'favorite_count': 18, 'reply_count': 3, 'retweet_count': 5,
-        }]}})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        rows = await data365_posts(client, 'x', {'data365_api_token': 'data365-token-value'},
-                                   ['Samrat Choudhary'], now() - timedelta(hours=1))
-    assert [req.method for req in requests] == ['POST', 'GET', 'GET']
-    assert rows[0]['external_id'] == '19001'
-    assert rows[0]['url'] == 'https://x.com/reporter_bihar/status/19001'
-    assert rows[0]['engagement'] == {'likes': 18, 'comments': 3, 'shares': 5, 'views': 0}
-    assert rows[0]['source_provider'] == 'data365'
-
-
-@pytest.mark.asyncio
-async def test_data365_exhausts_all_cursor_pages():
-    item_requests = []
-
-    def handler(req):
-        if req.method == 'POST':
-            return httpx.Response(202, json={'data': {'status': 'accepted'}})
-        if str(req.url.path).endswith('/update'):
-            return httpx.Response(200, json={'data': {'status': 'finished'}})
-        item_requests.append(req)
-        if 'cursor' not in req.url.params:
-            return httpx.Response(200, json={'data': {
-                'items': [{'id': 'page-1'}],
-                'page_info': {'has_next_page': True, 'cursor': 'next-page'},
-            }})
-        assert req.url.params['cursor'] == 'next-page'
-        return httpx.Response(200, json={'data': {
-            'items': [{'id': 'page-2'}],
-            'page_info': {'has_next_page': False, 'cursor': ''},
-        }})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        items = await _run_data365_search(
-            client, 'x', 'token', 'Samrat Choudhary', now() - timedelta(hours=1), 1000,
-        )
-
-    assert [item['id'] for item in items] == ['page-1', 'page-2']
-    assert len(item_requests) == 2
-    assert all(req.url.params['max_page_size'] == '500' for req in item_requests)
-
-
-@pytest.mark.parametrize('platform', ['instagram', 'reddit'])
-def test_data365_search_status_uses_update_endpoint(platform):
-    create_url, _, status_url, _, _, _ = _data365_request_spec(
-        platform, 'Samrat Choudhary', now() - timedelta(hours=1), 10,
-    )
-    assert create_url.endswith('/update')
-    assert status_url == create_url
-    if platform == 'instagram':
-        assert '/instagram/tag/Samrat%20Choudhary/' in create_url
-
-
-@pytest.mark.asyncio
-async def test_social_provider_falls_back_to_data365_only_for_empty_apify(monkeypatch):
-    calls = []
-
-    async def empty_apify(*args):
-        calls.append('apify')
-        return []
-
-    async def working_data365(*args):
-        calls.append('data365')
-        return [{'external_id': 'fallback-1'}]
-
-    monkeypatch.setattr('app.services.apify_posts', empty_apify)
-    monkeypatch.setattr('app.services.data365_posts', working_data365)
-    rows, provider, reason = await _social_posts_with_fallback(
-        None, 'x', {'api_key': 'a', 'data365_api_token': 'd'},
+    monkeypatch.setattr('app.services.apify_posts', working_apify)
+    rows = await _social_posts(
+        None, 'x', {'api_key': 'a'},
         ['Samrat Choudhary'], now() - timedelta(hours=1),
     )
-    assert calls == ['apify', 'data365']
-    assert rows == [{'external_id': 'fallback-1'}]
-    assert provider == 'data365' and reason == 'Apify returned no usable posts'
-
-
-@pytest.mark.asyncio
-async def test_data365_keeps_partial_results_when_one_search_fails(monkeypatch):
-    async def partial_search(client, platform, token, query, since, max_posts):
-        if query == 'Bihar BJP':
-            raise ProviderError('One Data365 task failed')
-        return [{
-            'id': 'partial-1', 'text': 'Samrat Choudhary reviews Bihar projects',
-            'created_time': now().isoformat(), 'owner_username': 'bihar_updates',
-        }]
-
-    monkeypatch.setattr(data365_module, '_run_data365_search', partial_search)
-    rows = await data365_posts(
-        None, 'instagram', {'data365_api_token': 'token'},
-        ['Samrat Choudhary', 'Bihar BJP'], now() - timedelta(hours=1),
-    )
-    assert len(rows) == 1
-    assert rows[0]['external_id'] == 'partial-1'
-    assert rows[0]['source_provider'] == 'data365'
+    assert rows == [{'external_id': 'apify-1'}]
 
 
 @pytest.mark.asyncio

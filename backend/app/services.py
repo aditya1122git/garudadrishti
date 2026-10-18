@@ -10,13 +10,12 @@ from pymongo.errors import DuplicateKeyError
 from .config import config, DEFAULT_AUTOMATION_START_HOUR, DEFAULT_AUTOMATION_END_HOUR
 from .models import now
 from .connectors import apify_posts, google_news_posts, youtube_posts, request
-from .data365 import data365_posts
 from .sentiment import classifier
 
 POST_SCOPE = {'$or': [{'platform': {'$ne': 'youtube'}}, {'demo': True}, {'content_scope': 'youtube-title-only-v2'}]}
 
 PLATFORMS = ['facebook', 'instagram', 'x', 'youtube', 'news', 'reddit']
-TRACKING_SCOPE_VERSION = 'samrat-bihar-bjp-government-v2'
+TRACKING_SCOPE_VERSION = 'samrat-bihar-bjp-government-v3-media'
 DEFAULT_KEYWORD_VARIANTS = [
     'Samrat Chaudhary', 'BJP Bihar', 'Bihar Bharatiya Janata Party',
     'Government of Bihar', '#SamratChoudhary', '#BJP4Bihar', '#BiharGovernment',
@@ -28,6 +27,17 @@ KEYWORDS = [
     'NDA', 'NDA Bihar', 'BJP NDA', 'एनडीए',
     '#NDA', '#NDAAlliance', '#NDABihar', '#BJPNDA', '#भाजपाएनडीए', '#एनडीए',
 ]
+
+
+def _classification_text(post_row):
+    """Give extracted media evidence priority within the model token window."""
+    media_text = str(post_row.get('media_text') or '').strip()
+    caption = str(post_row.get('caption') or '').strip()
+    if media_text:
+        return f'[MEDIA SPEECH/OCR]\n{media_text}\n\n[CAPTION]\n{caption}'
+    return str(post_row.get('content') or '')
+
+
 def today():
     return now().astimezone(ZoneInfo(config().reporting_timezone)).date().isoformat()
 
@@ -70,12 +80,10 @@ async def statuses(db):
             source = {
                 'news': 'Google News RSS',
                 'apify': 'Apify Actor',
-                'data365': 'Data365 API',
-                'hybrid': 'Apify + Data365',
             }.get(p if p == 'news' else c.get('mode'), 'Live API')
             result.append(dict(platform=p, source=source,
                                status=c.get('status', 'pending'), last_synced_at=c.get('last_synced_at'),
-                               error=c.get('error'), last_provider=c.get('last_provider')))
+                               error=c.get('error')))
         else:
             result.append(dict(platform=p, source='Not connected', status='disconnected', last_synced_at=None))
     return result
@@ -211,42 +219,14 @@ def sync_running():
     return _sync_lock.locked()
 
 
-async def _social_posts_with_fallback(client, platform, secret, keywords, since):
-    """Prefer Apify, using Data365 only after an error or zero usable rows."""
+async def _social_posts(client, platform, secret, keywords, since, media_skip_ids=None):
+    """Fetch public social posts through the configured Apify Actor."""
     apify_token = str(secret.get('api_key', '')).strip()
-    data365_token = str(secret.get('data365_api_token', '')).strip()
-    if not apify_token and not data365_token:
-        raise RuntimeError('Neither Apify nor Data365 is configured')
-
-    apify_empty = False
-    apify_error = None
-    if apify_token:
-        try:
-            rows = await apify_posts(client, platform, secret, keywords, since)
-            if rows:
-                return rows, 'apify', None
-            apify_empty = True
-        except Exception as exc:
-            apify_error = str(exc) if isinstance(exc, RuntimeError) else 'Connection failed'
-
-    if data365_token:
-        try:
-            rows = await data365_posts(client, platform, secret, keywords, since)
-            fallback_reason = apify_error or ('Apify returned no usable posts' if apify_empty else None)
-            return rows, 'data365', fallback_reason
-        except Exception as exc:
-            data365_error = str(exc) if isinstance(exc, RuntimeError) else 'Connection failed'
-            if apify_error:
-                raise RuntimeError(f'Apify: {apify_error}; Data365: {data365_error}') from None
-            if apify_empty:
-                raise RuntimeError(f'Apify returned no usable posts; Data365: {data365_error}') from None
-            raise RuntimeError(f'Data365: {data365_error}') from None
-
-    if apify_error:
-        raise RuntimeError(
-            f'Apify: {apify_error}; Data365 token is not configured in the API container'
-        ) from None
-    return [], 'apify', None
+    if not apify_token:
+        raise RuntimeError('Apify API token is not configured')
+    return await apify_posts(
+        client, platform, secret, keywords, since, media_skip_ids=media_skip_ids,
+    )
 
 async def scheduled_sync(db, client, platforms):
     """Run without any logged-in user, but only inside the operating window."""
@@ -292,8 +272,17 @@ async def sync(db, client, platforms=None):
                         elif p == 'news':
                             rows = await google_news_posts(client, keywords, since)
                         else:
-                            rows, provider_used, fallback_reason = await _social_posts_with_fallback(
-                                client, p, secret, keywords, since,
+                            # Avoid paying to analyze the same overlapping media
+                            # again after a successful extraction.
+                            media_skip_ids = {
+                                stored['external_id'] async for stored in db.posts.find({
+                                    'platform': p,
+                                    'published_at': {'$gte': since},
+                                    'media_analysis_version': 1,
+                                }, {'external_id': 1})
+                            }
+                            rows = await _social_posts(
+                                client, p, secret, keywords, since, media_skip_ids,
                             )
                         for row in rows:
                             if p == 'youtube':
@@ -302,12 +291,28 @@ async def sync(db, client, platforms=None):
                                     'content_scope': {'$ne': 'youtube-title-only-v2'}},
                                     {'$set': row, '$unset': {'description': ''}})
                             await db.posts.update_one({'platform': p, 'external_id': row['external_id']}, {'$setOnInsert': row}, upsert=True)
+                            if row.get('media_analysis_version'):
+                                # Enrich existing caption-only rows exactly once when
+                                # the Actor returns them during the media backfill.
+                                media_fields = {
+                                    key: row[key] for key in (
+                                        'caption', 'content', 'media_assets', 'media_text',
+                                        'media_analysis', 'media_analysis_version',
+                                    ) if key in row
+                                }
+                                await db.posts.update_one({
+                                    'platform': p,
+                                    'external_id': row['external_id'],
+                                    'media_analysis_version': {'$ne': row['media_analysis_version']},
+                                }, {
+                                    '$set': {**media_fields, 'sentiment': None,
+                                             'classification_status': 'pending'},
+                                    '$unset': {'classification_error': '', 'hf_candidate': '',
+                                               'telegram_notification': ''},
+                                })
                         credential_update = {'last_synced_at': started, 'status': 'live', 'error': None,
                                              'tracking_scope_version': TRACKING_SCOPE_VERSION,
                                              'encrypted_api_key': encrypt(secret)}
-                        if p in {'facebook', 'instagram', 'x', 'reddit'}:
-                            credential_update['last_provider'] = provider_used
-                            credential_update['fallback_reason'] = fallback_reason
                         if p == 'youtube':
                             credential_update['search_strategy'] = 'keyword-and-short-v3'
                         elif p == 'news':
@@ -332,7 +337,7 @@ async def sync(db, client, platforms=None):
                 size = config().hf_batch_size
                 for offset in range(0, len(posts), size):
                     batch = posts[offset:offset + size]
-                    results = await engine.classify([p['content'] for p in batch])
+                    results = await engine.classify([_classification_text(p) for p in batch])
                     for p, r in zip(batch, results, strict=True):
                         if r.pending:
                             await db.posts.update_one({'_id': p['_id']}, {

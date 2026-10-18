@@ -1233,9 +1233,8 @@ function Feed({
             <span>POSTED · IST</span>
           </div>
           {posts?.items.slice(0, compact ? 4 : 20).map((p) => {
-            const redditExpandable =
-              p.platform === "reddit" && p.content.length > 240;
-            const redditExpanded = expandedPosts.has(p._id);
+            const contentExpandable = p.content.length > 500;
+            const contentExpanded = expandedPosts.has(p._id);
             return (
             <article className="post-row" key={p._id}>
               <div>
@@ -1250,16 +1249,16 @@ function Feed({
                 </div>
                 <p
                   className={
-                    redditExpandable && !redditExpanded
+                    contentExpandable && !contentExpanded
                       ? "reddit-post-content compact"
-                      : p.platform === "reddit"
+                      : contentExpandable
                         ? "reddit-post-content"
                         : undefined
                   }
                 >
                   {p.content}
                 </p>
-                {(redditExpandable ||
+                {(contentExpandable ||
                   (p.url && /^https:\/\//.test(p.url))) && (
                   <div className="post-actions">
                     {p.url && /^https:\/\//.test(p.url) && (
@@ -1268,11 +1267,11 @@ function Feed({
                         <ArrowUpRight size={12} />
                       </a>
                     )}
-                    {redditExpandable && (
+                    {contentExpandable && (
                       <button
                         type="button"
                         className="reddit-more"
-                        aria-expanded={redditExpanded}
+                        aria-expanded={contentExpanded}
                         onClick={() =>
                           setExpandedPosts((current) => {
                             const next = new Set(current);
@@ -1282,7 +1281,7 @@ function Feed({
                           })
                         }
                       >
-                        {redditExpanded ? "Show less" : "More"}
+                        {contentExpanded ? "Show less" : "More"}
                       </button>
                     )}
                   </div>
