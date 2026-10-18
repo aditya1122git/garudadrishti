@@ -12,7 +12,7 @@ import {
   Pie,
   Cell,
 } from "recharts";
-import { Eye, EyeSlash, LayoutDashboard, Radio, Settings, Download, Search, ArrowUpRight, TriangleAlert, ChevronRight, RefreshCw, LogOut, ShieldCheck, CalendarDays, Activity, Check, Close, Bell, Menu , PlatformIcon } from "./icons";
+import { Eye, EyeSlash, LayoutDashboard, Radio, Settings, Download, Search, ArrowUpRight, TriangleAlert, ChevronRight, LogOut, ShieldCheck, CalendarDays, Activity, Check, Close, Bell, Menu , PlatformIcon } from "./icons";
 // @ts-ignore: CSS is handled by the bundler and has no TypeScript declarations.
 import "bootstrap/dist/css/bootstrap.min.css";
 // @ts-ignore: CSS is handled by the bundler and has no TypeScript declarations.
@@ -232,7 +232,9 @@ function SyncScheduleProgress({ schedule }: { schedule: NonNullable<Overview["sc
               aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(state.progress)}>
               <i style={{ width: `${state.progress}%` }} />
             </div>
-            <small>{item.interval_seconds === 900 ? "Every 15 minutes" : "Every 4 hours"}</small>
+            <small>{item.interval_seconds === 900
+              ? "Every 15 minutes"
+              : `Every ${item.interval_seconds / 3600} hours`}</small>
           </div>
         );
       })}
@@ -341,7 +343,6 @@ function Workspace({
     [platform, setPlatform] = useState(""),
     [data, setData] = useState<Overview | null>(null),
     [error, setError] = useState(""),
-    [busy, setBusy] = useState(false),
     [revision, setRevision] = useState(0),
     [report, setReport] = useState(false),
     [detail, setDetail] = useState<Alert | null>(null),
@@ -376,29 +377,24 @@ function Workspace({
     };
   }, [platform, revision, beginLoading]);
   useEffect(() => {
-    const t = setInterval(() => setRevision((x) => x + 1), 60000);
-    return () => clearInterval(t);
+    const refreshDashboard = () => setRevision((x) => x + 1);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshDashboard();
+    };
+    const timer = window.setInterval(refreshDashboard, 30000);
+    window.addEventListener("focus", refreshDashboard);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshDashboard);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   }, []);
   useEffect(() => {
     if (!data?.sync_running) return;
     const t = window.setInterval(() => setRevision((x) => x + 1), 5000);
     return () => window.clearInterval(t);
   }, [data?.sync_running]);
-  async function refresh() {
-    const finishLoading = beginLoading("Refreshing monitoring data…");
-    setBusy(true);
-    setError("");
-    try {
-      if (session.role === "admin") await json("/sync", { method: "POST" });
-      setRevision((x) => x + 1);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-      finishLoading();
-    }
-  }
-  const syncing = busy || !!data?.sync_running;
   const active = data?.alerts.find((a) => a.date === data.date),
     selectedSource = data?.sources.find((s) => s.platform === platform),
     disconnected = selectedSource?.status === "disconnected";
@@ -510,14 +506,6 @@ function Workspace({
                   <i />
                 </div>
               </div>
-              <button
-                onClick={refresh}
-                  disabled={syncing}
-                aria-label="Refresh monitoring data"
-              >
-                  <RefreshCw size={16} className={syncing ? "spin" : ""} />
-                  {syncing ? "Refreshing…" : "Refresh"}
-              </button>
               <button className="btn btn-primary primary" onClick={() => setReport(true)}>
                 <Download size={16} />
                 Export report
@@ -1767,7 +1755,7 @@ function SettingsPanel({
           <div className="schedule-editor">
             <div>
               <strong>Active automation window</strong>
-              <p>YouTube and Google News run every 15 minutes. Other social sources run every 4 hours.</p>
+              <p>YouTube and Google News run every 15 minutes. Other social sources run every 3 hours.</p>
             </div>
             <label>
               Start time

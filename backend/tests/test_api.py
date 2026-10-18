@@ -6,7 +6,7 @@ import csv
 import io
 import pytest
 from fastapi.testclient import TestClient
-from app.main import app
+from app.main import app, configure_automation_jobs
 
 
 @pytest.fixture(scope='module')
@@ -19,6 +19,28 @@ def auth(client):
     response = client.post('/api/auth/token', data={'username': 'admin@jannetra.local', 'password': 'JanNetra-Demo-2026!'})
     assert response.status_code == 200
     return {'Authorization': 'Bearer ' + response.json()['access_token']}
+
+
+def test_social_automation_runs_every_three_hours():
+    class Scheduler:
+        def __init__(self):
+            self.jobs = []
+
+        def get_job(self, _job_id):
+            return None
+
+        def remove_job(self, _job_id):
+            raise AssertionError('No existing jobs should be removed in this fixture')
+
+        def add_job(self, function, trigger, **kwargs):
+            self.jobs.append((function, trigger, kwargs))
+
+    scheduler = Scheduler()
+    configure_automation_jobs(scheduler, object(), object(), 6, 22)
+    social = next(job for job in scheduler.jobs if job[2]['id'] == 'all-sources-3h')
+    assert social[1] == 'cron'
+    assert social[2]['hour'] == '6,9,12,15,18,21'
+    assert social[2]['minute'] == 0
 
 
 def test_auth_required(client):

@@ -41,7 +41,8 @@ async def background_manual_sync(database, client):
 
 def configure_automation_jobs(scheduler, database, client, start_hour: int, end_hour: int):
     """Replace automation jobs using the administrator's active-hour window."""
-    job_ids = ('all-sources-4h', 'youtube-news-quarter-hour', 'youtube-news-full-hour')
+    job_ids = ('all-sources-4h', 'all-sources-3h',
+               'youtube-news-quarter-hour', 'youtube-news-full-hour')
     for job_id in job_ids:
         if scheduler.get_job(job_id):
             scheduler.remove_job(job_id)
@@ -49,10 +50,10 @@ def configure_automation_jobs(scheduler, database, client, start_hour: int, end_
     frequent_full_hours = [hour for hour in range(start_hour + 1, end_hour + 1)
                            if hour not in social_hours]
     common = dict(max_instances=1, coalesce=True, misfire_grace_time=300)
-    # At each four-hour boundary one combined run avoids overlapping sync jobs.
+    # At each three-hour boundary one combined run avoids overlapping sync jobs.
     scheduler.add_job(
         scheduled_sync, 'cron', hour=','.join(map(str, social_hours)), minute=0,
-        args=[database, client, PLATFORMS], id='all-sources-4h', **common,
+        args=[database, client, PLATFORMS], id='all-sources-3h', **common,
     )
     # YouTube and Google News RSS run every 15 minutes inside the window.
     scheduler.add_job(
@@ -84,11 +85,12 @@ def automation_schedule():
         'enabled': True,
         'frequent': {
             'label': 'YouTube + News', 'interval_seconds': 15 * 60,
-            'next_run_at': next_time('all-sources-4h', 'youtube-news-quarter-hour', 'youtube-news-full-hour'),
+            'next_run_at': next_time('all-sources-3h', 'youtube-news-quarter-hour', 'youtube-news-full-hour'),
         },
         'social': {
-            'label': 'Facebook + Instagram + X + Reddit', 'interval_seconds': 4 * 60 * 60,
-            'next_run_at': next_time('all-sources-4h'),
+            'label': 'Facebook + Instagram + X + Reddit',
+            'interval_seconds': APIFY_SYNC_INTERVAL_HOURS * 60 * 60,
+            'next_run_at': next_time('all-sources-3h'),
         },
     }
 
