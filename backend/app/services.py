@@ -149,6 +149,7 @@ def _telegram_link_label(platform: object) -> str:
         'reddit': 'View on Reddit',
     }.get(key, 'View original post')
 
+
 async def notify_negative_posts(db, client):
     """Send one idempotent Telegram message for every newly classified negative post."""
     c = config()
