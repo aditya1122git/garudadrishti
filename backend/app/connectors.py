@@ -8,7 +8,7 @@ import random
 import re
 import time
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 from xml.etree import ElementTree
@@ -34,7 +34,7 @@ NEWS_CHANNELS = (
     'CNN-News18', 'News24', 'Bharat24', 'DD News', 'ANI', 'PTI',
     'Amar Ujala', 'Jansatta', 'Oneindia Hindi', 'Punjab Kesari',
     'Times of India', 'Hindustan Times', 'Indian Express', 'The Hindu',
-    'The Economic Times', 'Kashish News',
+    'Economic Times', 'Kashish News',
 )
 
 NEWS_LOCALES = (
@@ -51,13 +51,9 @@ NEWS_SEARCH_QUERIES = (
 
 YOUTUBE_SEARCH_TERMS = (
     'Samrat Choudhary',
-    'Samrat Chaudhary',
     'Bihar BJP',
     'Bihar Government',
     'NDA Bihar',
-    'सम्राट चौधरी',
-    'बिहार भाजपा',
-    'बिहार सरकार',
 )
 
 X_SEARCH_GROUPS = (
@@ -127,7 +123,7 @@ NEWS_SOURCE_ALIASES = {
     'Hindustan Times': ('hindustantimes',),
     'Indian Express': ('indianexpress',),
     'The Hindu': ('thehindu',),
-    'The Economic Times': ('economictimes',),
+    'Economic Times': ('economictimes',),
     'Kashish News': ('kashishnews',),
 }
 
@@ -242,9 +238,6 @@ async def youtube_posts(client, secret, keywords, since):
     search_params = dict(
         part='snippet', type='video', order='date', maxResults=50,
         q='|'.join(query_terms), publishedAfter=since.isoformat().replace('+00:00', 'Z'),
-        # India-wide availability without a radius/location filter. YouTube's
-        # location filter only covers the small subset of geotagged uploads.
-        regionCode='IN',
     )
     # search.list returns at most 50 rows per response. Exhaust pageToken so a
     # busy 15-minute interval is not silently truncated to its first 50 videos.
@@ -454,9 +447,7 @@ def _actor_input(platform, keywords, since, max_items):
             search_terms.append(f'({query}) since:{since.date().isoformat()}')
         if not search_terms:
             raise ProviderError('No supported X search terms are active')
-        # Latest + Top executes two searches per term and can return the same
-        # tweet twice. Latest is sufficient for incremental monitoring.
-        return {'searchTerms': search_terms, 'maxItems': max_items, 'sort': 'Latest'}
+        return {'searchTerms': search_terms, 'maxItems': max_items, 'sort': 'Latest + Top'}
     if platform == 'reddit':
         active = {keyword.strip().casefold() for keyword in keywords if keyword.strip()}
         active_queries = [query for triggers, query in REDDIT_SEARCH_GROUPS
@@ -557,44 +548,19 @@ async def apify_posts(client, platform, secret, keywords, since, media_skip_ids=
     max_items = REDDIT_MAX_ITEMS if platform == 'reddit' else APIFY_MAX_ITEMS
     if platform == 'facebook':
         # The official Posts Actor accepts page/profile URLs, not keywords.
-        # Cache discovery for seven days; rediscover immediately if the active
-        # keyword set changes. This removes a paid discovery run every 3 hours.
-        keyword_scope = hashlib.sha256('\0'.join(sorted(
-            str(keyword).strip().casefold() for keyword in keywords if str(keyword).strip()
-        )).encode()).hexdigest()
-        page_urls = list(secret.get('facebook_page_cache') or ())
-        try:
-            cached_at = datetime.fromisoformat(
-                str(secret.get('facebook_page_cache_at') or '').replace('Z', '+00:00')
-            ).astimezone(timezone.utc)
-        except ValueError:
-            cached_at = None
-        cache_valid = (
-            page_urls
-            and secret.get('facebook_page_cache_scope') == keyword_scope
-            and cached_at is not None
-            and cached_at >= datetime.now(timezone.utc) - timedelta(days=7)
-        )
-        if not cache_valid:
-            discovery = await _run_apify_actor(client, APIFY_FACEBOOK_DISCOVERY_ACTOR, api_key, {
-                'categories': keywords[:10],
-                # Discover relevant public pages across India. Post bodies are
-                # still filtered against the tracked Bihar-focused keywords.
-                'locations': ['India'],
-                'resultsLimit': APIFY_FACEBOOK_DISCOVERY_LIMIT,
-            }, APIFY_FACEBOOK_DISCOVERY_LIMIT)
-            page_urls = []
-            for item in discovery:
-                candidate = str(_first(item, 'facebookUrl', 'pageUrl', 'url', default='')).strip()
-                if (candidate.startswith(('https://www.facebook.com/', 'https://facebook.com/'))
-                        and candidate not in page_urls):
-                    page_urls.append(candidate)
-            if page_urls:
-                secret.update(
-                    facebook_page_cache=page_urls,
-                    facebook_page_cache_at=datetime.now(timezone.utc).isoformat(),
-                    facebook_page_cache_scope=keyword_scope,
-                )
+        # Discover matching public pages first, then fetch their latest posts.
+        discovery = await _run_apify_actor(client, APIFY_FACEBOOK_DISCOVERY_ACTOR, api_key, {
+            'categories': keywords[:10],
+            # Discover relevant public pages across India. Post bodies are
+            # still filtered against the tracked Bihar-focused keywords.
+            'locations': ['India'],
+            'resultsLimit': APIFY_FACEBOOK_DISCOVERY_LIMIT,
+        }, APIFY_FACEBOOK_DISCOVERY_LIMIT)
+        page_urls = []
+        for item in discovery:
+            candidate = str(_first(item, 'facebookUrl', 'pageUrl', 'url', default='')).strip()
+            if candidate.startswith(('https://www.facebook.com/', 'https://facebook.com/')) and candidate not in page_urls:
+                page_urls.append(candidate)
         if not page_urls:
             return []
         per_page = max(1, max_items // len(page_urls))

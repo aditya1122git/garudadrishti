@@ -1221,7 +1221,8 @@ function Feed({
             <span>POSTED · IST</span>
           </div>
           {posts?.items.slice(0, compact ? 4 : 20).map((p) => {
-            const contentExpandable = p.content.length > 500;
+            const contentExpandable =
+              p.content.length > 300 || p.content.split(/\r?\n/).length > 3;
             const contentExpanded = expandedPosts.has(p._id);
             return (
             <article className="post-row" key={p._id}>
@@ -1238,9 +1239,9 @@ function Feed({
                 <p
                   className={
                     contentExpandable && !contentExpanded
-                      ? "reddit-post-content compact"
+                      ? "post-content compact"
                       : contentExpandable
-                        ? "reddit-post-content"
+                        ? "post-content"
                         : undefined
                   }
                 >
@@ -1258,7 +1259,7 @@ function Feed({
                     {contentExpandable && (
                       <button
                         type="button"
-                        className="reddit-more"
+                        className="post-more"
                         aria-expanded={contentExpanded}
                         onClick={() =>
                           setExpandedPosts((current) => {

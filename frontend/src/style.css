@@ -901,7 +901,7 @@ main {
   margin-top: 7px;
   line-height: 1.6;
 }
-.reddit-post-content.compact {
+.post-content.compact {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
@@ -914,7 +914,7 @@ main {
   gap: 12px;
   width: 100%;
 }
-.reddit-more {
+.post-more {
   display: inline-flex;
   border: 0;
   padding: 0;
@@ -926,8 +926,8 @@ main {
   line-height: 1.4;
   margin-left: auto;
 }
-.reddit-more:hover,
-.reddit-more:focus-visible {
+.post-more:hover,
+.post-more:focus-visible {
   color: #ff6714;
   text-decoration: underline;
 }
