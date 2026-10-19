@@ -48,4 +48,4 @@ The Windows workspace sandbox prevented Vite's development dependency optimizer 
 
 28 backend tests passed, 1 optional real-Mongo test skipped; production frontend build and dependency consistency check passed. Actual live Mongo aggregation, YouTube-only ingestion, login/feed/exports checked. See MODEL-VALIDATION.md for the accuracy limitations and current local ports.
 
-The title-only update was rechecked: descriptions and comments are excluded. The older provider run is superseded by the current Gemini verifier and must be rechecked after its key is configured.
+The YouTube text update was rechecked: titles and descriptions are included while comments are excluded. The older provider run is superseded by the current Gemini verifier and must be rechecked after its key is configured.

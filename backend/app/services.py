@@ -13,10 +13,12 @@ from .models import now
 from .connectors import apify_posts, google_news_posts, youtube_posts, request
 from .sentiment import classifier
 
-POST_SCOPE = {'$or': [{'platform': {'$ne': 'youtube'}}, {'demo': True}, {'content_scope': 'youtube-title-only-v2'}]}
+YOUTUBE_CONTENT_SCOPE = 'youtube-title-description-v3'
+YOUTUBE_SEARCH_STRATEGY = 'keyword-title-description-v4'
+POST_SCOPE = {'$or': [{'platform': {'$ne': 'youtube'}}, {'demo': True}, {'content_scope': YOUTUBE_CONTENT_SCOPE}]}
 
 PLATFORMS = ['facebook', 'instagram', 'x', 'youtube', 'news', 'reddit']
-TRACKING_SCOPE_VERSION = 'samrat-bihar-bjp-government-v3-media'
+TRACKING_SCOPE_VERSION = 'samrat-bihar-bjp-government-v3'
 DEFAULT_KEYWORD_VARIANTS = [
     'Samrat Chaudhary', 'BJP Bihar', 'Bihar Bharatiya Janata Party',
     'Government of Bihar', '#SamratChoudhary', '#BJP4Bihar', '#BiharGovernment',
@@ -30,12 +32,10 @@ KEYWORDS = [
 ]
 
 
-def _classification_text(post_row):
-    """Give extracted media evidence priority within the model token window."""
-    media_text = str(post_row.get('media_text') or '').strip()
-    caption = str(post_row.get('caption') or '').strip()
-    if media_text:
-        return f'[MEDIA SPEECH/OCR]\n{media_text}\n\n[CAPTION]\n{caption}'
+def _text_for_classification(post_row):
+    """Use source text only; ignore any legacy enrichment appended to content."""
+    if post_row.get('platform') in {'facebook', 'instagram', 'x', 'reddit'} and 'caption' in post_row:
+        return str(post_row.get('caption') or '')
     return str(post_row.get('content') or '')
 
 
@@ -116,7 +116,7 @@ async def rollup(db):
     rows += [dict(date=d, platform='overall', **v) for d, v in overall.items()]
     for row in rows:
         row['negativity_index'] = round(row['negative_count'] / row['total_count'] * 100, 1) if row['total_count'] else 0
-        await db.daily_aggregates.update_one({'date': row['date'], 'platform': row['platform']}, {'$set': {**row, 'schema_version': 1, 'content_scope': 'youtube-title-only-v2'}}, upsert=True)
+        await db.daily_aggregates.update_one({'date': row['date'], 'platform': row['platform']}, {'$set': {**row, 'schema_version': 1, 'content_scope': YOUTUBE_CONTENT_SCOPE}}, upsert=True)
 
 async def create_alert(db, day):
     prefs = await settings(db)
@@ -134,7 +134,7 @@ async def create_alert(db, day):
         await db.alerts.update_one({'date': day}, {'$setOnInsert': dict(schema_version=1, date=day, threshold=prefs['threshold'],
                                   triggered_at=now(), notified_channels=[], resolved=False),
                                   '$set': dict(negative_count=row['negative_count'], top_negative_posts=top, platform_breakdown=breakdown,
-                                               content_scope='youtube-title-only-v2')}, upsert=True)
+                                               content_scope=YOUTUBE_CONTENT_SCOPE)}, upsert=True)
     except DuplicateKeyError:
         pass
 
@@ -245,14 +245,12 @@ def sync_running():
     return _sync_lock.locked()
 
 
-async def _social_posts(client, platform, secret, keywords, since, media_skip_ids=None):
+async def _social_posts(client, platform, secret, keywords, since):
     """Fetch public social posts through the configured Apify Actor."""
     apify_token = str(secret.get('api_key', '')).strip()
     if not apify_token:
         raise RuntimeError('Apify API token is not configured')
-    return await apify_posts(
-        client, platform, secret, keywords, since, media_skip_ids=media_skip_ids,
-    )
+    return await apify_posts(client, platform, secret, keywords, since)
 
 async def scheduled_sync(db, client, platforms):
     """Run without any logged-in user, but only inside the operating window."""
@@ -286,7 +284,7 @@ async def sync(db, client, platforms=None):
                             since = now() - timedelta(days=(
                                 config().youtube_initial_lookback_days if p == 'youtube' else 7
                             ))
-                        elif p == 'youtube' and c.get('search_strategy') != 'keyword-and-short-v3':
+                        elif p == 'youtube' and c.get('search_strategy') != YOUTUBE_SEARCH_STRATEGY:
                             since = now() - timedelta(days=config().youtube_initial_lookback_days)
                         elif p == 'news' and c.get('search_strategy') != 'entity-rss-v3':
                             since = now() - timedelta(days=7)
@@ -298,49 +296,23 @@ async def sync(db, client, platforms=None):
                         elif p == 'news':
                             rows = await google_news_posts(client, keywords, since)
                         else:
-                            # Avoid paying to analyze the same overlapping media
-                            # again after a successful extraction.
-                            media_skip_ids = {
-                                stored['external_id'] async for stored in db.posts.find({
-                                    'platform': p,
-                                    'published_at': {'$gte': since},
-                                    'media_analysis_version': 1,
-                                }, {'external_id': 1})
-                            }
-                            rows = await _social_posts(
-                                client, p, secret, keywords, since, media_skip_ids,
-                            )
+                            rows = await _social_posts(client, p, secret, keywords, since)
                         for row in rows:
                             if p == 'youtube':
-                                # Upgrade legacy search snippets to full video content once.
+                                # Upgrade legacy title-only rows to title + description
+                                # and send them through classification once.
                                 await db.posts.update_one({'platform': p, 'external_id': row['external_id'],
-                                    'content_scope': {'$ne': 'youtube-title-only-v2'}},
-                                    {'$set': row, '$unset': {'description': ''}})
+                                    'content_scope': {'$ne': YOUTUBE_CONTENT_SCOPE}},
+                                    {'$set': row, '$unset': {
+                                        'classification_error': '', 'hf_candidate': '',
+                                        'telegram_notification': '',
+                                    }})
                             await db.posts.update_one({'platform': p, 'external_id': row['external_id']}, {'$setOnInsert': row}, upsert=True)
-                            if row.get('media_analysis_version'):
-                                # Enrich existing caption-only rows exactly once when
-                                # the Actor returns them during the media backfill.
-                                media_fields = {
-                                    key: row[key] for key in (
-                                        'caption', 'content', 'media_assets', 'media_text',
-                                        'media_analysis', 'media_analysis_version',
-                                    ) if key in row
-                                }
-                                await db.posts.update_one({
-                                    'platform': p,
-                                    'external_id': row['external_id'],
-                                    'media_analysis_version': {'$ne': row['media_analysis_version']},
-                                }, {
-                                    '$set': {**media_fields, 'sentiment': None,
-                                             'classification_status': 'pending'},
-                                    '$unset': {'classification_error': '', 'hf_candidate': '',
-                                               'telegram_notification': ''},
-                                })
                         credential_update = {'last_synced_at': started, 'status': 'live', 'error': None,
                                              'tracking_scope_version': TRACKING_SCOPE_VERSION,
                                              'encrypted_api_key': encrypt(secret)}
                         if p == 'youtube':
-                            credential_update['search_strategy'] = 'keyword-and-short-v3'
+                            credential_update['search_strategy'] = YOUTUBE_SEARCH_STRATEGY
                         elif p == 'news':
                             credential_update['search_strategy'] = 'entity-rss-v3'
                         await db.platform_credentials.update_one({'_id': c['_id']}, {'$set': credential_update})
@@ -359,12 +331,29 @@ async def sync(db, client, platforms=None):
                     ],
                     'platform': {'$in': enabled},
                     'demo': False,
+                    'classification_status': {'$ne': 'excluded_no_text'},
                 }).limit(200).to_list(200)
                 size = config().hf_batch_size
                 for offset in range(0, len(posts), size):
                     batch = posts[offset:offset + size]
-                    results = await engine.classify([_classification_text(p) for p in batch])
-                    for p, r in zip(batch, results, strict=True):
+                    inputs = [(p, _text_for_classification(p)) for p in batch]
+                    blank_posts = [p for p, text in inputs if not text.strip()]
+                    for p in blank_posts:
+                        await db.posts.update_one({'_id': p['_id']}, {
+                            '$set': {
+                                'classification_status': 'excluded_no_text',
+                                'classification_error': (
+                                    'No source caption/text is available for classification'
+                                ),
+                            },
+                            '$unset': {'sentiment': '', 'hf_candidate': '',
+                                       'telegram_notification': ''},
+                        })
+                    valid = [(p, text) for p, text in inputs if text.strip()]
+                    if not valid:
+                        continue
+                    results = await engine.classify([text for _, text in valid])
+                    for (p, _), r in zip(valid, results, strict=True):
                         if r.pending:
                             await db.posts.update_one({'_id': p['_id']}, {
                                 '$set': {
@@ -405,7 +394,7 @@ async def sync(db, client, platforms=None):
         await rollup(db)
         await notify_negative_posts(db, client)
         # Include late-arriving posts from previous reporting days.
-        async for day in db.daily_aggregates.find({'platform': 'overall', 'content_scope': 'youtube-title-only-v2'}):
+        async for day in db.daily_aggregates.find({'platform': 'overall', 'content_scope': YOUTUBE_CONTENT_SCOPE}):
             await create_alert(db, day['date'])
 
 async def seed(db):

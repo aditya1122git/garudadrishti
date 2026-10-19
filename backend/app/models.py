@@ -35,10 +35,6 @@ class Post(Document):
     author: str
     content: str
     caption: str = ''
-    media_assets: list[dict[str, str]] = Field(default_factory=list)
-    media_text: str = ''
-    media_analysis: dict[str, Any] | None = None
-    media_analysis_version: int | None = None
     url: str
     published_at: datetime
     engagement: Engagement = Field(default_factory=Engagement)

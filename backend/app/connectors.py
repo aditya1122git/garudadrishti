@@ -20,9 +20,7 @@ from .config import (
     APIFY_RUN_TIMEOUT_SECONDS,
     DEFAULT_APIFY_ACTORS,
     REDDIT_MAX_ITEMS,
-    config,
 )
-from .media_analysis import enrich_media_posts, extract_media_assets
 
 NEWS_CHANNELS = (
     'News18', 'Zee Bihar', 'ABP Bihar', 'News State', 'Sahara Samay',
@@ -256,7 +254,8 @@ async def youtube_posts(client, secret, keywords, since):
             break
         seen_page_tokens.add(next_page_token)
         page_token = next_page_token
-    # Fetch stable video metadata in batches. Sentiment uses the title only.
+    # Fetch stable video metadata in batches. Discovery, storage and sentiment
+    # use the complete public title + description text.
     ids = list(videos)
     for offset in range(0, len(ids), 50):
         details = await youtube_get('videos', dict(
@@ -264,10 +263,12 @@ async def youtube_posts(client, secret, keywords, since):
         for video in details.get('items', []):
             vid, snippet = video['id'], video['snippet']
             title = snippet['title']
-            if not matches(title, keywords):
+            description = str(snippet.get('description') or '').strip()
+            content = f'{title}\n{description}'.strip()
+            if not matches(content, keywords):
                 continue
             stats = video.get('statistics', {})
-            row = post('youtube', vid, snippet['channelTitle'], title,
+            row = post('youtube', vid, snippet['channelTitle'], content,
                        f'https://www.youtube.com/watch?v={vid}', snippet['publishedAt'],
                        dict(likes=stats.get('likeCount', 0), views=stats.get('viewCount', 0)))
             duration = video.get('contentDetails', {}).get('duration', '')
@@ -277,8 +278,9 @@ async def youtube_posts(client, secret, keywords, since):
                                 + int(duration_match.group(3) or 0)) if duration_match else None
             short_candidate = duration_seconds is not None and duration_seconds < 240
             row.update(content_type='short' if short_candidate else 'video', title=title,
+                       description=description,
                        discovery=sorted(videos[vid]),
-                       content_scope='youtube-title-only-v2')
+                       content_scope='youtube-title-description-v3')
             rows.append(row)
     secret.pop('watched_videos', None)
     return rows
@@ -485,7 +487,6 @@ def _apify_item(platform, item, keywords, since):
     # Social Actors expose the post body in `text`/`caption`; replies and
     # comments are intentionally excluded.
     content = f'{title}\n{text}'.strip() if platform == 'reddit' else text or title
-    media_assets = extract_media_assets(item)
     author_handle = str(_first(
         item, 'author.userName', 'author.username', 'user.userName', 'user.username',
         'ownerUsername', 'username', default='',
@@ -494,11 +495,9 @@ def _apify_item(platform, item, keywords, since):
         content, [*keywords, *X_MATCH_ALIASES] if platform == 'x' else keywords,
     ) if content else False
     official_x_post = platform == 'x' and author_handle in X_OFFICIAL_HANDLES
-    # Media-only political posts must survive normalization long enough for
-    # OCR/transcription to determine whether they match the tracked entities.
-    if not content and not media_assets:
+    if not content:
         return None
-    if not (content_matches or official_x_post or media_assets):
+    if not (content_matches or official_x_post):
         return None
     published = _timestamp(_first(item, 'publishedAt', 'published_at', 'createdAt', 'created_at', 'created_utc',
                                   'takenAt', 'date_utc', 'timestamp', 'date', 'time', 'timeCreated',
@@ -521,7 +520,7 @@ def _apify_item(platform, item, keywords, since):
     row = post(platform, external_id, author, content, url, published.isoformat(), engagement)
     row.update(source_provider='apify', content_scope=(
         'reddit-public-post-v1' if platform == 'reddit' else 'apify-public-post-v1'
-    ), caption=content, media_assets=media_assets,
+    ), caption=content,
         _caption_keyword_match=content_matches, _official_x_post=official_x_post)
     return row
 
@@ -540,7 +539,7 @@ async def _run_apify_actor(client, actor_id, api_key, payload, limit):
     return data
 
 
-async def apify_posts(client, platform, secret, keywords, since, media_skip_ids=None):
+async def apify_posts(client, platform, secret, keywords, since):
     """Run the configured Apify Actors and normalize public social posts."""
     api_key = str(secret.get('api_key', '')).strip()
     if not api_key:
@@ -586,16 +585,10 @@ async def apify_posts(client, platform, secret, keywords, since, media_skip_ids=
             candidates.append(row)
     if data and invalid == len(data):
         raise ProviderError('Apify output has no usable publication timestamps; check Actor mapping')
-    media_skip_ids = set(media_skip_ids or ())
-    candidates = [row for row in candidates
-                  if not (row.get('media_assets') and row['external_id'] in media_skip_ids)]
-    candidates = await enrich_media_posts(client, config(), candidates)
     rows = []
-    relevance_keywords = [*keywords, *X_MATCH_ALIASES] if platform == 'x' else keywords
     for row in candidates:
-        media_match = matches(row.get('media_text', ''), relevance_keywords)
         if not (row.pop('_caption_keyword_match', False)
-                or row.pop('_official_x_post', False) or media_match):
+                or row.pop('_official_x_post', False)):
             continue
         rows.append(row)
     return rows

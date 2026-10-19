@@ -211,7 +211,7 @@ async def test_gemini_accepts_mixed_label_and_uses_structured_output():
 
 
 @pytest.mark.asyncio
-async def test_youtube_classifies_title_only_never_description_or_comments():
+async def test_youtube_classifies_title_and_description_never_comments():
     paths = []
 
     def handler(req):
@@ -241,13 +241,14 @@ async def test_youtube_classifies_title_only_never_description_or_comments():
         rows = await youtube_posts(
             client, {'api_key': 'test'}, ['Samrat Choudhary'], now() - timedelta(days=1),
         )
-    assert paths.count('/youtube/v3/search') == 1 and len(rows) == 1
-    assert rows[0]['content'] == 'Samrat Choudhary meeting'
-    assert 'description' not in rows[0]
+    assert paths.count('/youtube/v3/search') == 1 and len(rows) == 2
+    assert rows[0]['content'] == 'Samrat Choudhary meeting\nFull description, not a search excerpt.'
+    assert rows[0]['description'] == 'Full description, not a search excerpt.'
     assert rows[0]['engagement']['comments'] == 0
     assert rows[0]['engagement']['views'] == 90
-    assert rows[0]['content_scope'] == 'youtube-title-only-v2'
+    assert rows[0]['content_scope'] == 'youtube-title-description-v3'
     assert rows[0]['content_type'] == 'short'
+    assert rows[1]['content'] == 'Unrelated daily bulletin\nSamrat Choudhary appears only here.'
 
 
 @pytest.mark.asyncio

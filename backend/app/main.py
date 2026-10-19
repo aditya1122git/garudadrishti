@@ -23,7 +23,10 @@ from .config import (config, APIFY_SYNC_INTERVAL_HOURS, DEFAULT_AUTOMATION_START
 from .connectors import _author_name
 from .sentiment import classifier_status
 from .models import DOCUMENTS, now, Platform, Label
-from .services import POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, PLATFORMS, today, bounds, settings, encrypt, audit, statuses, seed, sync, scheduled_sync, sync_running
+from .services import (POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, PLATFORMS,
+                       TRACKING_SCOPE_VERSION, YOUTUBE_CONTENT_SCOPE,
+                       YOUTUBE_SEARCH_STRATEGY, today, bounds, settings, encrypt,
+                       audit, statuses, seed, sync, scheduled_sync, sync_running)
 from .reporting import build_sentiment_pdf
 
 logger = logging.getLogger(__name__)
@@ -184,6 +187,14 @@ async def lifespan(app):
             }, upsert=True)
         elif not c.seed_mock_data:
             await db.platform_credentials.delete_one({'platform': p})
+    if not c.seed_mock_data:
+        # The campaign itself did not change when media extraction was removed,
+        # so preserve existing ingestion cursors instead of triggering a costly
+        # all-platform historical backfill.
+        await db.platform_credentials.update_many(
+            {'tracking_scope_version': 'samrat-bihar-bjp-government-v3-media'},
+            {'$set': {'tracking_scope_version': TRACKING_SCOPE_VERSION}},
+        )
     if not c.seed_mock_data and 'news' in c.enabled_platforms.split(','):
         # News is always credential-free Google RSS. Repair any stale
         # credential/error left by older deployments before the next run.
@@ -201,15 +212,12 @@ async def lifespan(app):
     if not c.seed_mock_data and 'youtube' in c.enabled_platforms.split(','):
         # One-time scope upgrade: refresh the last day using complete video snippets.
         await db.platform_credentials.update_one({'platform': 'youtube',
-            'content_scope': {'$ne': 'youtube-title-only-v2'}},
-            {'$set': {'content_scope': 'youtube-title-only-v2', 'last_synced_at': None,
+            'content_scope': {'$ne': YOUTUBE_CONTENT_SCOPE}},
+            {'$set': {'content_scope': YOUTUBE_CONTENT_SCOPE, 'last_synced_at': None,
                       'status': 'pending'}, '$unset': {'last_attempt_at': ''}})
         await db.platform_credentials.update_one({'platform': 'youtube',
-            'search_strategy': {'$ne': 'keyword-and-short-v3'}},
+            'search_strategy': {'$ne': YOUTUBE_SEARCH_STRATEGY}},
             {'$set': {'status': 'pending'}, '$unset': {'last_attempt_at': ''}})
-        # The active YouTube scope is deliberately title-only.
-        await db.posts.update_many({'platform': 'youtube', 'content_scope': 'youtube-title-only-v2'},
-                                   {'$unset': {'description': ''}})
     # Classified posts are immutable during normal startup and ingestion. Model
     # upgrades must use an explicit maintenance migration; silently clearing
     # sentiment here caused historical posts to join the new-post queue again.
@@ -318,7 +326,7 @@ async def overview(platform: Platform | None = None, user=Depends(current_user))
     sources = await statuses(db())
     usable = [s['platform'] for s in sources if s['status'] != 'disconnected']
     selected = [platform] if platform in usable else usable if platform is None else []
-    rows = await db().daily_aggregates.find({'content_scope': 'youtube-title-only-v2', 'date': {'$gte': (date.fromisoformat(today()) - timedelta(days=29)).isoformat()},
+    rows = await db().daily_aggregates.find({'content_scope': YOUTUBE_CONTENT_SCOPE, 'date': {'$gte': (date.fromisoformat(today()) - timedelta(days=29)).isoformat()},
                                           'platform': {'$in': selected}}, {'_id': 0}).to_list(None)
     grouped = {}
     for r in rows:
@@ -328,7 +336,11 @@ async def overview(platform: Platform | None = None, user=Depends(current_user))
     for v in grouped.values():
         v['negativity_index'] = round(v['negative_count'] / v['total_count'] * 100, 1) if v['total_count'] else 0
     prefs = await settings(db())
-    pending = await db().posts.count_documents({**POST_SCOPE, 'sentiment': None, 'platform': {'$in': selected}, 'demo': config().seed_mock_data})
+    pending = await db().posts.count_documents({
+        **POST_SCOPE, 'sentiment': None, 'platform': {'$in': selected},
+        'demo': config().seed_mock_data,
+        'classification_status': {'$ne': 'excluded_no_text'},
+    })
     await audit(db(), user, 'view.overview', {'platform': platform})
     manual_sync_task = getattr(app.state, 'manual_sync_task', None)
     is_syncing = sync_running() or bool(manual_sync_task and not manual_sync_task.done())
@@ -339,7 +351,7 @@ async def overview(platform: Platform | None = None, user=Depends(current_user))
         schedule=automation_schedule(),
         classifier=classifier_status(),
         partial=pending > 0 or any(s['status'] in ['unavailable', 'pending'] for s in sources if s['platform'] in selected),
-        alerts=await db().alerts.find({'resolved': False, 'content_scope': 'youtube-title-only-v2'}).sort('date', -1).limit(30).to_list(30)))
+        alerts=await db().alerts.find({'resolved': False, 'content_scope': YOUTUBE_CONTENT_SCOPE}).sort('date', -1).limit(30).to_list(30)))
 
 @app.get('/api/posts')
 async def posts(q: str = Query('', max_length=200), platform: Platform | None = None, sentiment: Label | None = None,
@@ -499,7 +511,7 @@ async def export(period: Literal['daily', 'weekly', 'monthly'] = 'daily', format
     start = (date.fromisoformat(end_day) - timedelta(days=count - 1)).isoformat()
     source_rows = await statuses(db())
     connected = [s['platform'] for s in source_rows if s['status'] != 'disconnected']
-    rows = await db().daily_aggregates.find({'content_scope': 'youtube-title-only-v2', 'date': {'$gte': start, '$lte': today()}, 'platform': {'$in': connected}}, {'_id': 0}).sort([('date', 1), ('platform', 1)]).to_list(None)
+    rows = await db().daily_aggregates.find({'content_scope': YOUTUBE_CONTENT_SCOPE, 'date': {'$gte': start, '$lte': today()}, 'platform': {'$in': connected}}, {'_id': 0}).sort([('date', 1), ('platform', 1)]).to_list(None)
     fields = ['date', 'platform', 'positive_count', 'negative_count', 'neutral_count', 'mixed_count', 'total_count', 'negativity_index']
     source_status = '; '.join(f'{s["platform"]}: {s["source"]}/{s["status"]}' for s in source_rows)
     if format == 'csv':

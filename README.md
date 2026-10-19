@@ -67,9 +67,6 @@ A local `.env` is provided beside `docker-compose.yml`. It is ignored by Git and
 | `HF_CPU_THREADS` | Default 2 CPU threads; inference runs in a background thread |
 | `HF_LOCAL_FILES_ONLY` | Offline cache-only loading after downloading weights; default false |
 | `GEMINI_API_KEY`, `GEMINI_MODEL` | Target-aware verifier key and model; default `gemini-3.5-flash-lite` |
-| `GEMINI_MEDIA_MODEL` | Optional multimodal override; defaults to `GEMINI_MODEL` |
-| `MEDIA_ANALYSIS_ENABLED` | Enables Gemini OCR, speech transcription, subtitle and video-frame text extraction for Apify social posts |
-| `MEDIA_ANALYSIS_CONCURRENCY`, `MEDIA_MAX_ASSETS_PER_POST`, `MEDIA_MAX_DOWNLOAD_MB` | Media processing concurrency and per-post safety limits; defaults 2, 3 and 100 MB |
 | `HF_CONFIDENCE_THRESHOLD`, `GEMINI_CONCURRENCY` | Gemini gate defaults to 0.80; 2 concurrent calls |
 | `ENABLED_PLATFORMS` | Comma-separated sources: `facebook,instagram,x,youtube,news,reddit`; set `youtube` for YouTube-only operation |
 | `YOUTUBE_API_KEY`, `YOUTUBE_BACKUP_API_KEY` | Primary YouTube Data API v3 key and optional quota-fallback key |
@@ -79,13 +76,13 @@ A local `.env` is provided beside `docker-compose.yml`. It is ignored by Git and
 | `ALLOWED_ORIGINS` | Exact CORS origins for the UI |
 | `REPORTING_TIMEZONE` | `Asia/Kolkata` by default |
 | `SCHEDULER_ENABLED` | Enables server-side automation; no admin session or open browser is required |
-| `YOUTUBE_SYNC_INTERVAL_MINUTES` | Fixed YouTube/Google News 15-minute schedule; social sources run every 4 hours |
+| `YOUTUBE_SYNC_INTERVAL_MINUTES` | Fixed YouTube/Google News 15-minute schedule; social sources run every 3 hours |
 
 ### Hugging Face multilingual classifier
 
 The primary classifier is `cardiffnlp/twitter-xlm-roberta-base-sentiment`, run locally with Transformers/PyTorch. Its [official model card](https://huggingface.co/cardiffnlp/twitter-xlm-roberta-base-sentiment) lists Hindi and English among eight sentiment fine-tuning languages. **Hinglish, sarcasm and Bihar political discourse have not been validated here.** It predicts overall text tone, not entity-targeted stance. A negative news report can concern an issue rather than the tracked party. Validate on human-labeled examples before relying on political alerts; model probability is not calibrated accuracy.
 
-Hugging Face runs locally. YouTube classification uses the video title only. Each title passes through language detection, tracked-entity detection and Cardiff multilingual sentiment. Results below `HF_CONFIDENCE_THRESHOLD` (default 0.80) go to Gemini, as do apparently confident results whose negative language may target an opponent, quoted speaker or unrelated event. Gemini measures stance specifically toward Samrat Choudhary, Bihar BJP, and the Bihar Government and handles Hindi, English, Hinglish and sarcasm. Mixed requires meaningful positive and negative stance toward a tracked target. `GEMINI_API_KEY` is required for verification. Missing keys/provider failures leave these items pending and excluded from final totals. Strict JSON schema output, result ID/count validation, per-item retry on malformed batches, exponential backoff and bounded concurrency are implemented. First local inference downloads about 1.1 GB of model weights. The model is cached once per API process, and serialized inference runs off the async event loop. Start deployment planning around 3 GB RAM for the API and benchmark on the actual host; CPU works and GPU is optional.
+Hugging Face runs locally. YouTube classification uses the video's title and description. That combined text passes through language detection, tracked-entity detection and Cardiff multilingual sentiment. Results below `HF_CONFIDENCE_THRESHOLD` (default 0.80) go to Gemini, as do apparently confident results whose negative language may target an opponent, quoted speaker or unrelated event. Gemini measures stance specifically toward Samrat Choudhary, Bihar BJP, and the Bihar Government and handles Hindi, English, Hinglish and sarcasm. Mixed requires meaningful positive and negative stance toward a tracked target. `GEMINI_API_KEY` is required for verification. Missing keys/provider failures leave these items pending and excluded from final totals. Strict JSON schema output, result ID/count validation, per-item retry on malformed batches, exponential backoff and bounded concurrency are implemented. First local inference downloads about 1.1 GB of model weights. The model is cached once per API process, and serialized inference runs off the async event loop. Start deployment planning around 3 GB RAM for the API and benchmark on the actual host; CPU works and GPU is optional.
 
 Only unclassified live posts are processed. Model upgrades do not silently requeue historical records; any deliberate reclassification must be run as a separate maintenance operation. Failed inference leaves posts pending and exposes `unavailable`; the next sync retries. Before first inference the status is `pending`. Model output count, named labels and probabilities are validated. Gemini results below the threshold and truncated HF inputs are flagged for review. Confidence is not calibrated accuracy; stored records include raw HF confidence, language, targets and final model provenance.
 
@@ -104,7 +101,7 @@ This uses built-in sample text only. It does not write posts, connect to social 
 | Platform | Implemented connector | Required access / coverage |
 |---|---|---|
 | X | Apify Actor, normalized output, overlap deduplication and retry/backoff | Apify API token. Public posts matching the tracked terms are searched without a Bihar geo filter. |
-| YouTube | Official Data API v3 video search + `videos.list` snippet/statistics | Every 15 minutes inside the admin-configured active window, one combined search covers all tracked terms and includes regular videos and Shorts. `videos.list` supplies duration and engagement metadata. If the primary key reports quota exhaustion, the connector switches to `YOUTUBE_BACKUP_API_KEY` for the rest of that run. The initial strategy upgrade backfills 7 days. Only the video title is matched, stored, and classified. Descriptions and comments are excluded. |
+| YouTube | Official Data API v3 video search + `videos.list` snippet/statistics | Every 15 minutes inside the admin-configured active window, one combined search covers all tracked terms and includes regular videos and Shorts. `videos.list` supplies the full title, description, duration and engagement metadata. If the primary key reports quota exhaustion, the connector switches to `YOUTUBE_BACKUP_API_KEY` for the rest of that run. The initial strategy upgrade backfills 7 days. Title and description are matched, stored and classified; comments are excluded. |
 | Facebook | Apify page discovery + posts Actor | Apify API token. Page discovery uses India scope; matching post bodies remain keyword-filtered. |
 | Instagram | Apify Instagram Actor | Apify API token. Public hashtag results are not restricted to Bihar. |
 | Reddit | Apify Reddit Actor | Public keyword search without a Bihar geo filter; comments are not ingested. |
@@ -120,7 +117,7 @@ Apify is the only social provider. The application uses fixed Actors for Faceboo
 
 `APIFY_API_TOKEN` is restart-repairable: after changing the deployment variable and restarting the API container, startup compares it with the encrypted MongoDB credential, replaces stale credentials, clears the old provider error and starts an immediate background social sync. The running process does not reread `.env` without a restart.
 
-Output normalization accepts common IDs, post text/caption/title, publication timestamps, URLs, authors and engagement counts. Approved Instagram/Facebook/X/Reddit media CDN assets are uploaded temporarily through the Gemini Files API. Gemini extracts poster/image OCR, spoken Hindi/English/Hinglish, reel subtitles, on-screen text and relevant visual context. Uploaded Gemini files are deleted immediately after analysis; Google also automatically expires Files API uploads. Extracted text is appended to the caption before relevance filtering and sentiment classification, so a media-only post can match a tracked entity. Items without a usable timestamp or a tracked term in either caption or extracted media text are excluded. Existing recent social rows receive one bounded seven-day media backfill after this schema upgrade.
+Output normalization accepts common IDs, post text/caption/title, publication timestamps, URLs, authors and engagement counts. Facebook, Instagram, X and Reddit relevance and sentiment use the returned post text/caption only. Items without a usable timestamp or a tracked term in that text are excluded. Images, audio, video frames, subtitles and other media files are not downloaded or analyzed.
 
 ## Data flow, reporting and alerts
 
@@ -140,7 +137,7 @@ Alert creation is idempotent on a unique `date` index and fires strictly above t
 
 Per-post Telegram alerts are enabled when both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. Each newly classified negative post is queued once and sent with its platform, author, confidence, excerpt and original link. Successful posts are marked sent; failed deliveries retry on a later sync. Existing historical negatives are not backfilled automatically, preventing a notification flood when Telegram is first enabled.
 
-The scheduler runs inside the API process without a logged-in admin. YouTube and Google News RSS run every 15 minutes; Facebook, Instagram and X run every four hours. The initial active window is 06:00-22:00 IST and an admin can change it in Settings. Saving immediately replaces the scheduler jobs and also changes the Telegram-delivery window. Classification follows ingestion, and each newly classified negative post is handed to Telegram after its batch. Only posts published today in Asia/Kolkata are alerted; older queued posts are marked skipped.
+The scheduler runs inside the API process without a logged-in admin. YouTube and Google News RSS run every 15 minutes; Facebook, Instagram, X and Reddit run every three hours. The initial active window is 06:00-22:00 IST and an admin can change it in Settings. Saving immediately replaces the scheduler jobs and also changes the Telegram-delivery window. Classification follows ingestion, and each newly classified negative post is handed to Telegram after its batch. Only posts published today in Asia/Kolkata are alerted; older queued posts are marked skipped.
 
 ## Security and deployment
 

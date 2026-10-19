@@ -42,11 +42,6 @@ class Config(BaseSettings):
     hf_local_files_only: bool = False
     gemini_api_key: str = ''
     gemini_model: str = 'gemini-3.5-flash-lite'
-    gemini_media_model: str = ''
-    media_analysis_enabled: bool = True
-    media_analysis_concurrency: int = 2
-    media_max_assets_per_post: int = 3
-    media_max_download_mb: int = 100
     hf_confidence_threshold: float = 0.80
     gemini_concurrency: int = 2
     enabled_platforms: str = 'facebook,instagram,x,youtube,news,reddit'
@@ -90,12 +85,6 @@ class Config(BaseSettings):
         if (not 0 <= self.hf_confidence_threshold <= 1
                 or not 1 <= self.gemini_concurrency <= 8):
             raise ValueError('Invalid classifier threshold/concurrency')
-        if not 1 <= self.media_analysis_concurrency <= 4:
-            raise ValueError('MEDIA_ANALYSIS_CONCURRENCY must be 1..4')
-        if not 1 <= self.media_max_assets_per_post <= 6:
-            raise ValueError('MEDIA_MAX_ASSETS_PER_POST must be 1..6')
-        if not 1 <= self.media_max_download_mb <= 250:
-            raise ValueError('MEDIA_MAX_DOWNLOAD_MB must be 1..250')
         if not 1 <= self.youtube_initial_lookback_days <= 30:
             raise ValueError('Invalid YouTube search coverage settings')
         if set(self.enabled_platforms.split(',')) - {'facebook', 'instagram', 'x', 'youtube', 'news', 'reddit'}:
@@ -108,7 +97,6 @@ class Config(BaseSettings):
             self.hf_model, self.hf_revision, self.gemini_model,
         )):
             raise ValueError('HF and Gemini model names/revisions are required')
-        self.gemini_media_model = self.gemini_media_model.strip() or self.gemini_model
         return self
 
 
