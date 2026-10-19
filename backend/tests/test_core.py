@@ -55,6 +55,18 @@ def test_social_classification_uses_original_caption_from_legacy_rows():
     }) == 'Samrat Choudhary interview\nFull video description'
 
 
+def test_youtube_classification_compacts_long_description_but_keeps_title():
+    text = _text_for_classification({
+        'platform': 'youtube',
+        'title': 'Samrat Choudhary interview',
+        'description': ('Bihar Government development update ' * 200),
+        'content': 'unused full content',
+    })
+    assert text.startswith('Samrat Choudhary interview\n')
+    assert text.endswith('…')
+    assert len(text) <= len('Samrat Choudhary interview\n') + 1201
+
+
 def test_keyword_matching_hindi_and_name_variants():
     assert matches('बिहार सरकार पर चर्चा', ['बिहार सरकार'])
     assert matches('Samrat Choudhary ki meeting', ['Samrat Choudhary'])

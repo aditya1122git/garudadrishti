@@ -15,6 +15,7 @@ from .sentiment import classifier
 
 YOUTUBE_CONTENT_SCOPE = 'youtube-title-description-v3'
 YOUTUBE_SEARCH_STRATEGY = 'keyword-title-description-v4'
+YOUTUBE_CLASSIFICATION_DESCRIPTION_CHARS = 1200
 POST_SCOPE = {'$or': [{'platform': {'$ne': 'youtube'}}, {'demo': True}, {'content_scope': YOUTUBE_CONTENT_SCOPE}]}
 
 PLATFORMS = ['facebook', 'instagram', 'x', 'youtube', 'news', 'reddit']
@@ -36,6 +37,14 @@ def _text_for_classification(post_row):
     """Use source text only; ignore any legacy enrichment appended to content."""
     if post_row.get('platform') in {'facebook', 'instagram', 'x', 'reddit'} and 'caption' in post_row:
         return str(post_row.get('caption') or '')
+    if post_row.get('platform') == 'youtube':
+        title = ' '.join(str(post_row.get('title') or '').split())
+        description = ' '.join(str(post_row.get('description') or '').split())
+        if title or description:
+            if len(description) > YOUTUBE_CLASSIFICATION_DESCRIPTION_CHARS:
+                description = description[:YOUTUBE_CLASSIFICATION_DESCRIPTION_CHARS].rsplit(' ', 1)[0].rstrip()
+                description += '…'
+            return f'{title}\n{description}'.strip()
     return str(post_row.get('content') or '')
 
 

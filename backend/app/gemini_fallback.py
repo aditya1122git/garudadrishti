@@ -130,11 +130,9 @@ class GeminiFallback:
             return [None] * len(texts)
         self.last_error = None
         async with httpx.AsyncClient(timeout=60) as client:
-            output = []
-            for offset in range(0, len(texts), 12):
-                batch = texts[offset:offset + 12]
+            async def classify_batch(batch):
                 try:
-                    output.extend(await self._request(client, batch))
+                    return await self._request(client, batch)
                 except (ValueError, KeyError, TypeError, json.JSONDecodeError):
                     # A malformed/misaligned batch is retried per title so results
                     # can never be written against the wrong post.
@@ -143,8 +141,13 @@ class GeminiFallback:
                             return (await self._request(client, [text]))[0]
                         except Exception:
                             return None
-                    output.extend(await asyncio.gather(*(single(t) for t in batch)))
+                    return await asyncio.gather(*(single(t) for t in batch))
                 except Exception:
                     self.last_error = 'Gemini request failed; verify model access, key and quota.'
-                    output.extend([None] * len(batch))
-            return output
+                    return [None] * len(batch)
+
+            batches = [texts[offset:offset + 12] for offset in range(0, len(texts), 12)]
+            # _request owns the configured semaphore, so batches run concurrently
+            # without exceeding GEMINI_CONCURRENCY. asyncio.gather preserves order.
+            grouped = await asyncio.gather(*(classify_batch(batch) for batch in batches))
+            return [result for group in grouped for result in group]
