@@ -211,7 +211,7 @@ async def notify_negative_posts(db, client):
         content = ' '.join(str(post_row.get('content') or '').split())[:800]
         platform = str(post_row.get('platform') or 'unknown')
         link_label = _telegram_link_label(platform)
-        message = (f'<b>🚨 GarudaDrishti negative post</b>\n\n'
+        message = (f'<b>🚨 SamratChoudhary Ji negative post</b>\n\n'
                    f'<b>Platform:</b> {html_escape(platform.title())}\n'
                    f'<b>Author:</b> {html_escape(str(post_row.get("author") or "Unknown"))}\n'
                    f'<b>Confidence:</b> {confidence}%\n\n'

@@ -181,7 +181,7 @@ async def test_negative_post_telegram_alert_is_idempotent(monkeypatch):
     assert payload['chat_id'] == '-1001234567890'
     assert payload['parse_mode'] == 'HTML'
     assert payload['disable_web_page_preview'] is True
-    assert 'GarudaDrishti negative post' in payload['text']
+    assert 'SamratChoudhary Ji negative post' in payload['text']
     assert '>View on Facebook</a>' in payload['text']
     assert 'Open post:' not in payload['text']
     assert 'https://example.org/post/negative-1' in payload['text']
