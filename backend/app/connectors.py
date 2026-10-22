@@ -126,13 +126,30 @@ NEWS_SOURCE_ALIASES = {
 }
 
 NEWS_SOURCE_EXACT_ALIASES = {'hindustan', 'ani', 'pti', 'presstrustofindia'}
+NEWS_SOURCE_EXACT_CHANNELS = {
+    'hindustan': 'Live Hindustan Bihar',
+    'ani': 'ANI',
+    'pti': 'PTI',
+    'presstrustofindia': 'PTI',
+}
+
+
+def canonical_news_source(value):
+    """Map Google News publisher variants to a configured display channel."""
+    normalized = re.sub(r'[^a-z0-9]+', '', str(value or '').lower())
+    if normalized in NEWS_SOURCE_EXACT_CHANNELS:
+        return NEWS_SOURCE_EXACT_CHANNELS[normalized]
+    matches = [
+        (len(alias), channel)
+        for channel, aliases in NEWS_SOURCE_ALIASES.items()
+        for alias in aliases
+        if alias in normalized
+    ]
+    return max(matches)[1] if matches else None
 
 
 def _approved_news_source(value):
-    normalized = re.sub(r'[^a-z0-9]+', '', str(value or '').lower())
-    return normalized in NEWS_SOURCE_EXACT_ALIASES or any(
-        alias in normalized for aliases in NEWS_SOURCE_ALIASES.values() for alias in aliases
-    )
+    return canonical_news_source(value) is not None
 
 
 class ProviderError(RuntimeError):
@@ -310,7 +327,8 @@ async def google_news_posts(client, keywords, since):
         found = []
         for item in root.findall('./channel/item'):
             source = _rss_text(item.findtext('source'))
-            if not _approved_news_source(source):
+            channel = canonical_news_source(source)
+            if not channel:
                 continue
             title = _rss_text(item.findtext('title'))
             suffix = f' - {source}'
@@ -326,7 +344,7 @@ async def google_news_posts(client, keywords, since):
             url = (item.findtext('link') or '').strip()
             guid = (item.findtext('guid') or '').strip()
             external_id = guid or hashlib.sha256(f'{url}\0{headline}\0{published.isoformat()}'.encode()).hexdigest()
-            row = post('news', external_id, source, headline, url, published.isoformat())
+            row = post('news', external_id, channel, headline, url, published.isoformat())
             row.update(source_provider='google-news-rss', content_scope='google-news-rss-v1', title=headline)
             found.append(row)
         return found

@@ -48,6 +48,12 @@ def _text_for_classification(post_row):
     return str(post_row.get('content') or '')
 
 
+def analytics_platforms():
+    """Platforms whose stored posts belong in historical analytics."""
+    enabled = {value.strip() for value in config().enabled_platforms.split(',')}
+    return [platform for platform in PLATFORMS if platform in enabled]
+
+
 def today():
     return now().astimezone(ZoneInfo(config().reporting_timezone)).date().isoformat()
 
@@ -99,9 +105,9 @@ async def statuses(db):
     return result
 
 async def rollup(db):
-    connected = [s['platform'] for s in await statuses(db) if s['status'] != 'disconnected']
+    included = analytics_platforms()
     start = now() - timedelta(days=35)
-    match = {**POST_SCOPE, 'published_at': {'$gte': start}, 'platform': {'$in': connected}, 'sentiment': {'$ne': None}, 'demo': config().seed_mock_data}
+    match = {**POST_SCOPE, 'published_at': {'$gte': start}, 'platform': {'$in': included}, 'sentiment': {'$ne': None}, 'demo': config().seed_mock_data}
     if config().demo_in_memory:
         # mongomock has no $dateTrunc. Only the explicit disposable demo uses this branch.
         grouped = defaultdict(lambda: dict(positive_count=0, negative_count=0, neutral_count=0, mixed_count=0, total_count=0))
@@ -133,12 +139,12 @@ async def create_alert(db, day):
     if not row or row['negative_count'] <= prefs['threshold']:
         return
     start, end = bounds(day)
-    connected = [s['platform'] for s in await statuses(db) if s['status'] != 'disconnected']
+    included = analytics_platforms()
     top = await db.posts.find({**POST_SCOPE, 'published_at': {'$gte': start, '$lt': end}, 'sentiment.label': 'negative',
-                              'platform': {'$in': connected}, 'demo': config().seed_mock_data}).sort('engagement_score', -1).limit(5).to_list(5)
+                              'platform': {'$in': included}, 'demo': config().seed_mock_data}).sort('engagement_score', -1).limit(5).to_list(5)
     for p in top:
         p['_id'] = str(p['_id'])
-    breakdown = {r['platform']: r['negative_count'] async for r in db.daily_aggregates.find({'date': day, 'platform': {'$in': connected}})}
+    breakdown = {r['platform']: r['negative_count'] async for r in db.daily_aggregates.find({'date': day, 'platform': {'$in': included}})}
     try:
         await db.alerts.update_one({'date': day}, {'$setOnInsert': dict(schema_version=1, date=day, threshold=prefs['threshold'],
                                   triggered_at=now(), notified_channels=[], resolved=False),

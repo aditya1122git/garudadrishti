@@ -20,12 +20,12 @@ from pydantic import BaseModel, Field
 from typing import Literal
 from .config import (config, APIFY_SYNC_INTERVAL_HOURS, DEFAULT_AUTOMATION_START_HOUR,
                      DEFAULT_AUTOMATION_END_HOUR)
-from .connectors import _author_name
+from .connectors import _author_name, NEWS_CHANNELS, canonical_news_source
 from .sentiment import classifier_status
 from .models import DOCUMENTS, now, Platform, Label
 from .services import (POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, PLATFORMS,
                        TRACKING_SCOPE_VERSION, YOUTUBE_CONTENT_SCOPE,
-                       YOUTUBE_SEARCH_STRATEGY, today, bounds, settings, encrypt,
+                       YOUTUBE_SEARCH_STRATEGY, analytics_platforms, today, bounds, settings, encrypt,
                        audit, statuses, seed, sync, scheduled_sync, sync_running)
 from .reporting import build_sentiment_pdf
 
@@ -322,11 +322,13 @@ async def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
             'name': user.get('name') or 'Administrator', 'email': user['email']}
 
 @app.get('/api/overview')
-async def overview(platform: Platform | None = None, user=Depends(current_user)):
+async def overview(platform: Platform | None = None, day: date | None = None, user=Depends(current_user)):
     sources = await statuses(db())
-    usable = [s['platform'] for s in sources if s['status'] != 'disconnected']
-    selected = [platform] if platform in usable else usable if platform is None else []
-    rows = await db().daily_aggregates.find({'content_scope': YOUTUBE_CONTENT_SCOPE, 'date': {'$gte': (date.fromisoformat(today()) - timedelta(days=29)).isoformat()},
+    included = analytics_platforms()
+    selected = [platform] if platform in included else included if platform is None else []
+    current_day = today()
+    selected_day = day.isoformat() if day else current_day
+    rows = await db().daily_aggregates.find({'content_scope': YOUTUBE_CONTENT_SCOPE, 'date': {'$gte': (date.fromisoformat(current_day) - timedelta(days=29)).isoformat()},
                                           'platform': {'$in': selected}}, {'_id': 0}).to_list(None)
     grouped = {}
     for r in rows:
@@ -335,6 +337,22 @@ async def overview(platform: Platform | None = None, user=Depends(current_user))
             out[k] += r.get(k, 0)
     for v in grouped.values():
         v['negativity_index'] = round(v['negative_count'] / v['total_count'] * 100, 1) if v['total_count'] else 0
+    selected_summary = grouped.get(selected_day)
+    if selected_summary is None:
+        selected_rows = await db().daily_aggregates.find({
+            'content_scope': YOUTUBE_CONTENT_SCOPE,
+            'date': selected_day,
+            'platform': {'$in': selected},
+        }, {'_id': 0}).to_list(None)
+        if selected_rows:
+            selected_summary = dict(date=selected_day, positive_count=0, negative_count=0,
+                                    neutral_count=0, mixed_count=0, total_count=0)
+            for row in selected_rows:
+                for key in ['positive_count', 'negative_count', 'neutral_count', 'mixed_count', 'total_count']:
+                    selected_summary[key] += row.get(key, 0)
+            selected_summary['negativity_index'] = round(
+                selected_summary['negative_count'] / selected_summary['total_count'] * 100, 1
+            ) if selected_summary['total_count'] else 0
     prefs = await settings(db())
     pending = await db().posts.count_documents({
         **POST_SCOPE, 'sentiment': None, 'platform': {'$in': selected},
@@ -344,9 +362,68 @@ async def overview(platform: Platform | None = None, user=Depends(current_user))
     await audit(db(), user, 'view.overview', {'platform': platform})
     manual_sync_task = getattr(app.state, 'manual_sync_task', None)
     is_syncing = sync_running() or bool(manual_sync_task and not manual_sync_task.done())
-    return serialize(dict(demo=config().seed_mock_data, date=today(), timezone=config().reporting_timezone,
-        sources=sources, today=grouped.get(today()), trend=sorted(grouped.values(), key=lambda x: x['date']),
-        platform_totals=[r for r in rows if r['date'] == today()], pending=pending, threshold=prefs['threshold'],
+    platform_totals = [r for r in rows if r['date'] == selected_day]
+    if selected_day != current_day and not platform_totals:
+        platform_totals = await db().daily_aggregates.find({
+            'content_scope': YOUTUBE_CONTENT_SCOPE, 'date': selected_day,
+            'platform': {'$in': selected},
+        }, {'_id': 0}).to_list(None)
+    selected_start, selected_end = bounds(selected_day)
+    news_sentiments = {
+        channel: {'positive_count': 0, 'negative_count': 0}
+        for channel in NEWS_CHANNELS
+    }
+    async for news_post in db().posts.find({
+        **POST_SCOPE,
+        'platform': 'news',
+        'published_at': {'$gte': selected_start, '$lt': selected_end},
+        'demo': config().seed_mock_data,
+    }, {'author': 1, 'sentiment.label': 1}):
+        channel = canonical_news_source(news_post.get('author'))
+        label = (news_post.get('sentiment') or {}).get('label')
+        if channel and label in {'positive', 'negative'}:
+            news_sentiments[channel][f'{label}_count'] += 1
+    historical_counts = {channel: 0 for channel in NEWS_CHANNELS}
+    historical_news = await db().posts.aggregate([
+        {'$match': {**POST_SCOPE, 'platform': 'news', 'demo': config().seed_mock_data}},
+        {'$group': {'_id': '$author', 'count': {'$sum': 1}}},
+    ]).to_list(None)
+    for row in historical_news:
+        channel = canonical_news_source(row.get('_id'))
+        if channel:
+            historical_counts[channel] += row.get('count', 0)
+    configured_order = {channel: index for index, channel in enumerate(NEWS_CHANNELS)}
+    top_channels = sorted(
+        NEWS_CHANNELS,
+        key=lambda channel: (-historical_counts[channel], configured_order[channel]),
+    )[:10]
+    active_selected_channels = sorted(
+        NEWS_CHANNELS,
+        key=lambda channel: (
+            -(news_sentiments[channel]['positive_count'] + news_sentiments[channel]['negative_count']),
+            -historical_counts[channel],
+            configured_order[channel],
+        ),
+    )
+    active_selected_channels = [
+        channel for channel in active_selected_channels
+        if news_sentiments[channel]['positive_count'] + news_sentiments[channel]['negative_count'] > 0
+    ]
+    remaining_channels = top_channels + [channel for channel in NEWS_CHANNELS if channel not in top_channels]
+    ordered_channels = active_selected_channels + [
+        channel for channel in remaining_channels if channel not in active_selected_channels
+    ]
+    return serialize(dict(demo=config().seed_mock_data, date=current_day, selected_date=selected_day,
+        timezone=config().reporting_timezone, sources=sources, today=grouped.get(current_day),
+        selected=selected_summary, trend=sorted(grouped.values(), key=lambda x: x['date']),
+        platform_totals=platform_totals,
+        news_channel_totals=[{
+            'channel': channel,
+            **news_sentiments[channel],
+            'historical_count': historical_counts[channel],
+            'historical_top_ten': channel in top_channels,
+        } for channel in ordered_channels],
+        pending=pending, threshold=prefs['threshold'],
         sync_running=is_syncing,
         schedule=automation_schedule(),
         classifier=classifier_status(),
@@ -357,8 +434,8 @@ async def overview(platform: Platform | None = None, user=Depends(current_user))
 async def posts(q: str = Query('', max_length=200), platform: Platform | None = None, sentiment: Label | None = None,
                 day: date | None = None, sort: Literal['recency', 'engagement'] = 'recency', page: int = Query(1, ge=1, le=10000), user=Depends(current_user)):
     import re
-    connected = [s['platform'] for s in await statuses(db()) if s['status'] != 'disconnected']
-    query = {**POST_SCOPE, 'platform': platform if platform in connected else {'$in': connected if platform is None else []}, 'demo': config().seed_mock_data}
+    included = analytics_platforms()
+    query = {**POST_SCOPE, 'platform': platform if platform in included else {'$in': included if platform is None else []}, 'demo': config().seed_mock_data}
     if q:
         # Escaped substring supports Hindi and English consistently; text index remains available for analytical queries.
         query['content'] = {'$regex': re.escape(q), '$options': 'i'}
@@ -510,8 +587,8 @@ async def export(period: Literal['daily', 'weekly', 'monthly'] = 'daily', format
     end_day = today()
     start = (date.fromisoformat(end_day) - timedelta(days=count - 1)).isoformat()
     source_rows = await statuses(db())
-    connected = [s['platform'] for s in source_rows if s['status'] != 'disconnected']
-    rows = await db().daily_aggregates.find({'content_scope': YOUTUBE_CONTENT_SCOPE, 'date': {'$gte': start, '$lte': today()}, 'platform': {'$in': connected}}, {'_id': 0}).sort([('date', 1), ('platform', 1)]).to_list(None)
+    included = analytics_platforms()
+    rows = await db().daily_aggregates.find({'content_scope': YOUTUBE_CONTENT_SCOPE, 'date': {'$gte': start, '$lte': today()}, 'platform': {'$in': included}}, {'_id': 0}).sort([('date', 1), ('platform', 1)]).to_list(None)
     fields = ['date', 'platform', 'positive_count', 'negative_count', 'neutral_count', 'mixed_count', 'total_count', 'negativity_index']
     source_status = '; '.join(f'{s["platform"]}: {s["source"]}/{s["status"]}' for s in source_rows)
     if format == 'csv':
@@ -534,7 +611,7 @@ async def export(period: Literal['daily', 'weekly', 'monthly'] = 'daily', format
         sentiment_posts = await db().posts.find({
             **POST_SCOPE,
             'published_at': {'$gte': range_start, '$lt': range_end},
-            'platform': {'$in': connected},
+            'platform': {'$in': included},
             'sentiment.label': sentiment_match,
             'demo': config().seed_mock_data,
         }, {

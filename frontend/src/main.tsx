@@ -11,8 +11,11 @@ import {
   PieChart,
   Pie,
   Cell,
+  BarChart,
+  Bar,
+  LabelList,
 } from "recharts";
-import { Eye, EyeSlash, LayoutDashboard, Radio, Settings, Download, Search, ArrowUpRight, TriangleAlert, ChevronRight, LogOut, ShieldCheck, CalendarDays, Activity, Check, Close, Bell, Menu , PlatformIcon } from "./icons";
+import { Eye, EyeSlash, LayoutDashboard, Radio, Settings, Download, Search, ArrowUpRight, TriangleAlert, ChevronRight, LogOut, CalendarDays, Activity, Check, Close, Bell, Menu , PlatformIcon } from "./icons";
 // @ts-ignore: CSS is handled by the bundler and has no TypeScript declarations.
 import "bootstrap/dist/css/bootstrap.min.css";
 // @ts-ignore: CSS is handled by the bundler and has no TypeScript declarations.
@@ -72,11 +75,20 @@ type Alert = {
 };
 type Overview = {
   date: string;
+  selected_date?: string;
   timezone: string;
   sources: Source[];
   today: Rollup | null;
+  selected?: Rollup | null;
   trend: Rollup[];
   platform_totals: Rollup[];
+  news_channel_totals?: {
+    channel: string;
+    positive_count: number;
+    negative_count: number;
+    historical_count: number;
+    historical_top_ten: boolean;
+  }[];
   pending: number;
   threshold: number;
   partial: boolean;
@@ -347,6 +359,7 @@ function Workspace({
     [report, setReport] = useState(false),
     [detail, setDetail] = useState<Alert | null>(null),
     [mobile, setMobile] = useState(false),
+    [selectedDay, setSelectedDay] = useState(""),
     [loadingTasks, setLoadingTasks] = useState(0),
     [loadingMessage, setLoadingMessage] = useState("Loading…");
   const beginLoading = React.useCallback((message = "Loading…") => {
@@ -365,7 +378,10 @@ function Workspace({
     // so a background sync never blocks the dashboard every five seconds.
     const finishLoading = data ? () => undefined : beginLoading("Loading dashboard data…");
     setError("");
-    overviewJson("/overview" + (platform ? "?platform=" + platform : ""))
+    const params = new URLSearchParams();
+    if (platform) params.set("platform", platform);
+    if (selectedDay) params.set("day", selectedDay);
+    overviewJson("/overview" + (params.size ? "?" + params : ""))
       .then((d) => {
         if (active) setData(d);
       })
@@ -375,7 +391,7 @@ function Workspace({
       active = false;
       finishLoading();
     };
-  }, [platform, revision, beginLoading]);
+  }, [platform, selectedDay, revision, beginLoading]);
   useEffect(() => {
     const refreshDashboard = () => setRevision((x) => x + 1);
     const refreshWhenVisible = () => {
@@ -395,10 +411,17 @@ function Workspace({
     const t = window.setInterval(() => setRevision((x) => x + 1), 5000);
     return () => window.clearInterval(t);
   }, [data?.sync_running]);
-  const active = data?.alerts.find((a) => a.date === data.date),
+  const displayedDay = selectedDay || data?.date || "",
+    isHistoricalDay = Boolean(data && displayedDay !== data.date),
+    summary = isHistoricalDay ? data?.selected ?? null : data?.today ?? null,
+    active = data?.alerts.find((a) => a.date === displayedDay),
     selectedSource = data?.sources.find((s) => s.platform === platform),
     disconnected = selectedSource?.status === "disconnected";
   const navigate = (v: string) => {
+    if (v === "alerts") {
+      setSelectedDay("");
+      setPlatform("");
+    }
     setView(v);
     setMobile(false);
   };
@@ -487,32 +510,34 @@ function Workspace({
                   : view === "feed"
                     ? "Explore the posts behind the numbers."
                     : view === "alerts"
-                      ? "Threshold breaches, evidence and notification status."
+                      ? "Daily negative posts and the rolling seven-day trend."
                       : view === "profile"
                         ? "Update your account details and password."
                         : "Manage the terms and sources you monitor."}
               </p>
             </div>
             {(view === "overview" || view === "feed") && <div className="heading-actions">
-              <div
-                className={`classification-progress ${!data || data.pending ? "active" : "complete"}`}
-                aria-label={!data ? "Classification status is loading" : data.pending ? `${num(data.pending)} posts remaining for classification` : "Classification is up to date"}
-              >
-                <div className="classification-progress-copy">
-                  <span>Classification</span>
-                  <strong>{!data ? "Loading" : data.pending ? `${num(data.pending)} remaining` : "Up to date"}</strong>
+              {!isHistoricalDay && (
+                <div
+                  className={`classification-progress ${!data || data.pending ? "active" : "complete"}`}
+                  aria-label={!data ? "Classification status is loading" : data.pending ? `${num(data.pending)} posts remaining for classification` : "Classification is up to date"}
+                >
+                  <div className="classification-progress-copy">
+                    <span>Classification</span>
+                    <strong>{!data ? "Loading" : data.pending ? `${num(data.pending)} remaining` : "Up to date"}</strong>
+                  </div>
+                  <div className="classification-progress-track" aria-hidden="true">
+                    <i />
+                  </div>
                 </div>
-                <div className="classification-progress-track" aria-hidden="true">
-                  <i />
-                </div>
-              </div>
+              )}
               <button className="btn btn-primary primary" onClick={() => setReport(true)}>
                 <Download size={16} />
                 Export report
               </button>
             </div>}
           </div>
-          {(view === "overview" || view === "feed") && data?.schedule?.enabled && (
+          {(view === "overview" || view === "feed") && !isHistoricalDay && data?.schedule?.enabled && (
             <SyncScheduleProgress schedule={data.schedule} />
           )}
           {error && (
@@ -534,39 +559,12 @@ function Workspace({
                     onSaved={() => setRevision((x) => x + 1)}
                   />
                 ) : view === "alerts" ? (
-                  <div className="panel alert-list">
-                    <div className="panel-title">
-                      <h2>Open alerts</h2>
-                      <span>{data.alerts.length} reporting days</span>
-                    </div>
-                    {data.alerts.length ? (
-                      data.alerts.map((a) => (
-                        <button
-                          className="alert-row"
-                          key={a.date}
-                          onClick={() => setDetail(a)}
-                        >
-                          <TriangleAlert />
-                          <div>
-                            <strong>
-                              {dateLabel(a.date)} · Negative volume threshold
-                              exceeded
-                            </strong>
-                            <span>
-                              {num(a.negative_count)} negative posts / threshold{" "}
-                              {num(a.threshold)}
-                            </span>
-                          </div>
-                          <ChevronRight />
-                        </button>
-                      ))
-                    ) : (
-                      <div className="empty">
-                        <ShieldCheck />
-                        No open threshold alerts.
-                      </div>
-                    )}
-                  </div>
+                  <AlertCentre
+                    day={displayedDay}
+                    today={data.date}
+                    trend={data.trend}
+                    onDayChange={(day) => setSelectedDay(day === data.date ? "" : day)}
+                  />
                 ) : (
                   <>
                     {active && (
@@ -580,7 +578,7 @@ function Workspace({
                           </strong>
                           <p>
                             <b>{num(active.negative_count)} negative posts</b>{" "}
-                            today ·{" "}
+                            on {dateLabel(displayedDay)} ·{" "}
                             {num(active.negative_count - active.threshold)}{" "}
                             above the {num(active.threshold)}-post threshold
                           </p>
@@ -619,10 +617,10 @@ function Workspace({
                       </div>
                       <span>
                         <CalendarDays size={15} />
-                        {dateLabel(data.date)}, {data.date.slice(0, 4)}
+                        {dateLabel(displayedDay)}, {displayedDay.slice(0, 4)}
                       </span>
                     </div>
-                    {disconnected ? (
+                    {disconnected && !isHistoricalDay ? (
                       <div className="panel empty">
                         <Radio size={32} />
                         <h2>{names[platform]} is not connected</h2>
@@ -644,11 +642,11 @@ function Workspace({
                               <Stat
                                 label="TOTAL CLASSIFIED"
                                 value={
-                                  data.today ? num(data.today.total_count) : "—"
+                                  summary ? num(summary.total_count) : "—"
                                 }
                                 note={
-                                  data.today
-                                    ? "Across connected sources"
+                                  summary
+                                    ? `Across enabled sources · ${dateLabel(displayedDay)}`
                                     : "No classified data available"
                                 }
                                 icon={<Activity size={18} />}
@@ -656,13 +654,13 @@ function Workspace({
                               <Stat
                                 label="POSITIVE"
                                 value={
-                                  data.today
-                                    ? num(data.today.positive_count)
+                                  summary
+                                    ? num(summary.positive_count)
                                     : "—"
                                 }
                                 note={
-                                  data.today
-                                    ? `${((data.today.positive_count / data.today.total_count) * 100).toFixed(1)}% of classified conversation`
+                                  summary
+                                    ? `${((summary.positive_count / summary.total_count) * 100).toFixed(1)}% of classified conversation`
                                     : "Awaiting data"
                                 }
                                 tone="positive"
@@ -670,13 +668,13 @@ function Workspace({
                               <Stat
                                 label="NEGATIVE"
                                 value={
-                                  data.today
-                                    ? num(data.today.negative_count)
+                                  summary
+                                    ? num(summary.negative_count)
                                     : "—"
                                 }
                                 note={
-                                  data.today
-                                    ? `${((data.today.negative_count / data.today.total_count) * 100).toFixed(1)}% of classified conversation`
+                                  summary
+                                    ? `${((summary.negative_count / summary.total_count) * 100).toFixed(1)}% of classified conversation`
                                     : "Awaiting data"
                                 }
                                 tone="negative"
@@ -684,13 +682,13 @@ function Workspace({
                               <Stat
                                 label="MIXED"
                                 value={
-                                  data.today
-                                    ? num(data.today.mixed_count || 0)
+                                  summary
+                                    ? num(summary.mixed_count || 0)
                                     : "â€”"
                                 }
                                 note={
-                                  data.today
-                                    ? `${(((data.today.mixed_count || 0) / data.today.total_count) * 100).toFixed(1)}% with both positive and negative stance`
+                                  summary
+                                    ? `${(((summary.mixed_count || 0) / summary.total_count) * 100).toFixed(1)}% with both positive and negative stance`
                                     : "Awaiting data"
                                 }
                                 tone="mixed"
@@ -698,8 +696,8 @@ function Workspace({
                               <Stat
                                 label="NEGATIVITY INDEX"
                                 value={
-                                  data.today
-                                    ? data.today.negativity_index.toFixed(1) +
+                                  summary
+                                    ? summary.negativity_index.toFixed(1) +
                                       "%"
                                     : "—"
                                 }
@@ -807,10 +805,10 @@ function Workspace({
                               </section>
                               <section className="panel mix-panel">
                                 <div className="panel-title">
-                                  <h2>Today’s sentiment</h2>
+                                  <h2>{isHistoricalDay ? `${dateLabel(displayedDay)} sentiment` : "Today’s sentiment"}</h2>
                                   <span>Share of voice</span>
                                 </div>
-                                {data.today ? (
+                                {summary ? (
                                   <>
                                     <div className="donut">
                                       <ResponsiveContainer
@@ -823,7 +821,7 @@ function Workspace({
                                               (l) => ({
                                                 name: l,
                                                 value:
-                                                  data.today![
+                                                  summary![
                                                     (l +
                                                       "_count") as keyof Rollup
                                                   ],
@@ -845,7 +843,7 @@ function Workspace({
                                       </ResponsiveContainer>
                                       <div className="donut-label">
                                         <strong>
-                                          {num(data.today.total_count)}
+                                          {num(summary.total_count)}
                                         </strong>
                                         <span>classified posts</span>
                                       </div>
@@ -860,7 +858,7 @@ function Workspace({
                                           <b>
                                             {num(
                                               Number(
-                                                data.today![
+                                                summary![
                                                   (l + "_count") as keyof Rollup
                                                 ],
                                               ),
@@ -877,6 +875,10 @@ function Workspace({
                                 )}
                               </section>
                             </div>
+                            <NewsChannelChart
+                              rows={data.news_channel_totals || []}
+                              day={displayedDay}
+                            />
                             <div className="secondary-grid">
                               <section className="panel">
                                 <div className="panel-title">
@@ -949,12 +951,7 @@ function Workspace({
                                             : "#eef1f4",
                                         }}
                                         onClick={() => {
-                                          setView("feed");
-                                          window.dispatchEvent(
-                                            new CustomEvent("filter-day", {
-                                              detail: day,
-                                            }),
-                                          );
+                                          setSelectedDay(day === data.date ? "" : day);
                                         }}
                                       >
                                         {dt.getDate()}
@@ -978,6 +975,8 @@ function Workspace({
                           platform={platform}
                           revision={revision}
                           defaultDay={data.date}
+                          day={displayedDay}
+                          onDayChange={(day) => setSelectedDay(day === data.date ? "" : day)}
                           compact={view === "overview"}
                           onExpand={() => setView("feed")}
                         />
@@ -1015,20 +1014,7 @@ function Workspace({
               .map(([p, n]) => names[p] + ": " + num(n))
               .join(" · ")}
           </p>
-          <h3>Five most-engaged negative posts</h3>
-          {detail.top_negative_posts.map((p) => (
-            <div className="evidence" key={p._id}>
-              <span>
-                {names[p.platform]} · {num(p.engagement_score)} interactions
-              </span>
-              <p>{p.content}</p>
-              {p.url && (
-                <a href={p.url} target="_blank" rel="noreferrer">
-                  View source ↗
-                </a>
-              )}
-            </div>
-          ))}
+          <AlertNegativePosts day={detail.date} />
           <p className="muted">
             {`Delivered: ${detail.notified_channels.join(", ") || "None"}`}
           </p>
@@ -1088,16 +1074,283 @@ function Stat({
   );
 }
 
+function NewsChannelChart({
+  rows,
+  day,
+}: {
+  rows: {
+    channel: string;
+    positive_count: number;
+    negative_count: number;
+    historical_count: number;
+    historical_top_ten: boolean;
+  }[];
+  day: string;
+}) {
+  const positiveTotal = rows.reduce((sum, row) => sum + row.positive_count, 0);
+  const negativeTotal = rows.reduce((sum, row) => sum + row.negative_count, 0);
+  const chartWidth = Math.max(1280, rows.length * 82);
+
+  return (
+    <section className="panel news-channel-panel">
+      <div className="panel-title">
+        <div>
+          <h2>News Channel Coverage</h2>
+          <p>{dateLabel(day)}</p>
+        </div>
+        <div className="news-chart-metrics">
+          <span className="positive"><i /><b>{num(positiveTotal)}</b> positive</span>
+          <span className="negative"><i /><b>{num(negativeTotal)}</b> negative</span>
+        </div>
+      </div>
+      <div className="news-channel-scroll">
+        <div className="news-channel-chart" style={{ width: chartWidth }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={rows} margin={{ left: -22, right: 12, top: 12, bottom: 76 }}>
+              <defs>
+                <linearGradient id="newsBarGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#48a98d" />
+                  <stop offset="100%" stopColor="#277b67" />
+                </linearGradient>
+                <linearGradient id="newsNegativeBarGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#e2645f" />
+                  <stop offset="100%" stopColor="#bd3735" />
+                </linearGradient>
+              </defs>
+              <CartesianGrid vertical={false} stroke="#eee4dc" strokeDasharray="4 5" />
+              <XAxis dataKey="channel" interval={0} angle={-38} textAnchor="end" tickLine={false}
+                axisLine={false} tick={{ fontSize: 10, fill: "#526273", fontWeight: 700 }} />
+              <YAxis allowDecimals={false} tickLine={false} axisLine={false}
+                tick={{ fontSize: 12, fill: "#718096" }} />
+              <Tooltip formatter={(value, name) => [num(Number(value)), name]}
+                cursor={{ fill: "rgba(255,111,15,0.06)", radius: 8 }}
+                contentStyle={{ borderRadius: 8, borderColor: "#eadfd6" }} />
+              <Bar dataKey="positive_count" name="Positive" stackId="sentiment"
+                fill="url(#newsBarGradient)" radius={[3, 3, 3, 3]}
+                maxBarSize={48} isAnimationActive={false}>
+                <LabelList dataKey="positive_count" position="center" fill="#fff" fontSize={10}
+                  fontWeight={700} formatter={(value: number) => value > 0 ? num(value) : ""} />
+              </Bar>
+              <Bar dataKey="negative_count" name="Negative" stackId="sentiment"
+                fill="url(#newsNegativeBarGradient)" radius={[8, 8, 3, 3]}
+                maxBarSize={48} isAnimationActive={false}>
+                <LabelList dataKey="negative_count" position="center" fill="#fff" fontSize={10}
+                  fontWeight={700} formatter={(value: number) => value > 0 ? num(value) : ""} />
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AlertCentre({
+  day,
+  today,
+  trend,
+  onDayChange,
+}: {
+  day: string;
+  today: string;
+  trend: Rollup[];
+  onDayChange: (day: string) => void;
+}) {
+  const lastSevenDays = Array.from({ length: 7 }, (_, index) => {
+    const current = new Date(today + "T12:00:00");
+    current.setDate(current.getDate() - 6 + index);
+    const date = current.toISOString().slice(0, 10);
+    const rollup = trend.find((row) => row.date === date);
+    return { date, negative_count: rollup?.negative_count || 0 };
+  });
+  const sevenDayTotal = lastSevenDays.reduce((total, row) => total + row.negative_count, 0);
+  const peakDay = lastSevenDays.reduce(
+    (peak, row) => row.negative_count > peak.negative_count ? row : peak,
+    lastSevenDays[0],
+  );
+
+  return (
+    <div className="alert-centre-content">
+      <section className="panel alert-trend-panel">
+        <div className="panel-title">
+          <div>
+            <h2>Negative posts · last 7 days</h2>
+            <p>Rolling daily volume through {dateLabel(today)}</p>
+          </div>
+          <div className="alert-chart-metrics">
+            <span><b>{num(sevenDayTotal)}</b> total</span>
+            <span><b>{num(peakDay.negative_count)}</b> peak · {dateLabel(peakDay.date)}</span>
+          </div>
+        </div>
+        <div className="alert-bar-chart">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={lastSevenDays} margin={{ left: -24, right: 12, top: 12, bottom: 0 }}>
+              <defs>
+                <linearGradient id="alertBarGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#e35b56" />
+                  <stop offset="100%" stopColor="#bd3735" />
+                </linearGradient>
+              </defs>
+              <CartesianGrid vertical={false} stroke="#eadfdd" strokeDasharray="4 5" />
+              <XAxis dataKey="date" tickFormatter={dateLabel} tickLine={false} axisLine={false}
+                tick={{ fontSize: 12, fill: "#718096" }} />
+              <YAxis allowDecimals={false} tickLine={false} axisLine={false}
+                tick={{ fontSize: 12, fill: "#718096" }} />
+              <Tooltip labelFormatter={(value) => dateLabel(String(value))}
+                formatter={(value) => [num(Number(value)), "Negative posts"]}
+                cursor={{ fill: "rgba(206,81,78,0.06)", radius: 8 }}
+                contentStyle={{ borderRadius: 6, borderColor: "#dfe5eb" }} />
+              <Bar dataKey="negative_count" name="Negative posts" fill="url(#alertBarGradient)"
+                radius={[9, 9, 3, 3]} maxBarSize={64} isAnimationActive={false}>
+                <LabelList dataKey="negative_count" position="center" fill="#fff" fontSize={12}
+                  fontWeight={700} formatter={(value: number) => value > 0 ? num(value) : ""} />
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </section>
+
+      <section className="panel alert-negative-list">
+        <div className="panel-title alert-date-filter">
+          <div>
+            <h2>Negative posts</h2>
+          </div>
+          <div className="alert-calendar-only">
+            <input className="form-control" type="date" aria-label="Filter alert posts by date"
+              value={day} max={today} onChange={(event) => onDayChange(event.target.value)} />
+          </div>
+        </div>
+        <AlertNegativePosts key={day} day={day} />
+      </section>
+    </div>
+  );
+}
+
+function AlertNegativePosts({ day }: { day: string }) {
+  const [page, setPage] = useState(1);
+  const [posts, setPosts] = useState<{ items: Post[]; total: number } | null>(null);
+  const [error, setError] = useState("");
+  const [expandedPosts, setExpandedPosts] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    let active = true;
+    setError("");
+    setPosts(null);
+    json(`/posts?sentiment=negative&day=${encodeURIComponent(day)}&sort=engagement&page=${page}`)
+      .then((result) => active && setPosts(result))
+      .catch((reason) => active && setError(reason.message));
+    return () => {
+      active = false;
+    };
+  }, [day, page]);
+
+  useEffect(() => setPage(1), [day]);
+  useEffect(() => setExpandedPosts(new Set()), [day, page]);
+
+  if (error) return <p className="error">{error}</p>;
+  if (!posts) return <div className="empty">Loading negative posts…</div>;
+  if (!posts.items.length) return <div className="empty">No negative posts found for this day.</div>;
+
+  return (
+    <>
+      <div className="alert-post-count">
+        <strong>{num(posts.total)}</strong> negative posts on {dateLabel(day)}
+      </div>
+      <div className="post-table alert-post-table">
+        <div className="table-heading">
+          <span>CONVERSATION</span>
+          <span>SENTIMENT</span>
+          <span>INTERACTIONS</span>
+          <span>POSTED · IST</span>
+        </div>
+        {posts.items.map((post) => {
+          const contentExpandable = post.content.length > 300 || post.content.split(/\r?\n/).length > 3;
+          const contentExpanded = expandedPosts.has(post._id);
+          return (
+            <article className="post-row" key={post._id}>
+              <div>
+                <div className="post-author">
+                  <span className={"mini-platform " + post.platform}>
+                    <PlatformIcon platform={post.platform} />
+                  </span>
+                  <b>{post.author}</b>
+                  <span>{names[post.platform]}</span>
+                </div>
+                <p className={contentExpandable && !contentExpanded ? "post-content compact" : "post-content"}>
+                  {post.content}
+                </p>
+                {(contentExpandable || (post.url && /^https:\/\//.test(post.url))) && (
+                  <div className="post-actions">
+                    {post.url && /^https:\/\//.test(post.url) && (
+                      <a href={post.url} target="_blank" rel="noreferrer">
+                        Open original <ArrowUpRight size={12} />
+                      </a>
+                    )}
+                    {contentExpandable && (
+                      <button type="button" className="post-more" aria-expanded={contentExpanded}
+                        onClick={() => setExpandedPosts((current) => {
+                          const next = new Set(current);
+                          if (next.has(post._id)) next.delete(post._id);
+                          else next.add(post._id);
+                          return next;
+                        })}>
+                        {contentExpanded ? "Show less" : "More"}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div>
+                <span className="sentiment negative">Negative</span>
+                {post.sentiment && <small>{Math.round(post.sentiment.confidence * 100)}% confidence</small>}
+              </div>
+              <div>
+                <strong>{num(post.engagement_score)}</strong>
+                <small>
+                  {num(post.engagement.likes)} likes / {post.platform === "youtube"
+                    ? `${num(post.engagement.views)} views`
+                    : `${num(post.engagement.comments)} replies`}
+                </small>
+              </div>
+              <div>
+                {new Date(post.published_at).toLocaleDateString("en-IN", {
+                  day: "numeric", month: "short", timeZone: "Asia/Kolkata",
+                })}
+                <small>
+                  {new Date(post.published_at).toLocaleTimeString("en-IN", {
+                    hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata",
+                  })}
+                </small>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+      {posts.total > 20 && (
+        <div className="pagination">
+          <span>Page {page} of {Math.ceil(posts.total / 20)}</span>
+          <button disabled={page === 1} onClick={() => setPage((value) => value - 1)}>Previous</button>
+          <button disabled={page * 20 >= posts.total} onClick={() => setPage((value) => value + 1)}>Next</button>
+        </div>
+      )}
+    </>
+  );
+}
+
 function Feed({
   platform,
   revision,
   defaultDay,
+  day,
+  onDayChange,
   compact,
   onExpand,
 }: {
   platform: string;
   revision: number;
   defaultDay: string;
+  day: string;
+  onDayChange: (day: string) => void;
   compact: boolean;
   onExpand: () => void;
 }) {
@@ -1106,7 +1359,6 @@ function Feed({
     [term, setTerm] = useState(""),
     [sentiment, setSentiment] = useState(""),
     [sort, setSort] = useState("recency"),
-    [day, setDay] = useState(defaultDay),
     [page, setPage] = useState(1),
     [posts, setPosts] = useState<{ items: Post[]; total: number } | null>(null),
     [loading, setLoading] = useState(true),
@@ -1118,11 +1370,6 @@ function Feed({
     const t = setTimeout(() => setTerm(q), 300);
     return () => clearTimeout(t);
   }, [q]);
-  useEffect(() => {
-    const fn = (e: Event) => setDay((e as CustomEvent).detail);
-    window.addEventListener("filter-day", fn);
-    return () => window.removeEventListener("filter-day", fn);
-  }, []);
   useEffect(() => setPage(1), [platform, term, sentiment, sort, day]);
   useEffect(
     () => setExpandedPosts(new Set()),
@@ -1203,10 +1450,13 @@ function Feed({
             type="date"
             aria-label="Filter date"
             value={day}
-            onChange={(e) => setDay(e.target.value)}
+            max={defaultDay}
+            onChange={(e) => onDayChange(e.target.value)}
           />
         )}
-        {day && <button onClick={() => setDay("")}>Clear date</button>}
+        {day !== defaultDay && (
+          <button onClick={() => onDayChange(defaultDay)}>Clear date</button>
+        )}
       </div>
       {error ? (
         <p className="error">{error}</p>
