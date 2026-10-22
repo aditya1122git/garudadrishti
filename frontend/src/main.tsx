@@ -123,7 +123,7 @@ const names: Record<string, string> = {
 
 function sourceStatus(source: Source) {
   if (source.status === "disconnected") {
-    return { label: "Not connected", detail: "Excluded from totals" };
+    return { label: "Not connected", detail: "Stored posts remain in totals" };
   }
 
   if (source.status === "unavailable") {
@@ -236,17 +236,10 @@ function SyncScheduleProgress({ schedule }: { schedule: NonNullable<Overview["sc
         const state = timing(item);
         return (
           <div className="sync-schedule-item" key={item.label}>
-            <div className="sync-schedule-copy">
-              <span>{item.label}</span>
-              <strong>{state.copy}</strong>
-            </div>
             <div className="sync-schedule-track" role="progressbar" aria-label={`${item.label} next automatic fetch`}
               aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(state.progress)}>
               <i style={{ width: `${state.progress}%` }} />
             </div>
-            <small>{item.interval_seconds === 900
-              ? "Every 15 minutes"
-              : `Every ${item.interval_seconds / 3600} hours`}</small>
           </div>
         );
       })}
@@ -620,7 +613,7 @@ function Workspace({
                         {dateLabel(displayedDay)}, {displayedDay.slice(0, 4)}
                       </span>
                     </div>
-                    {disconnected && !isHistoricalDay ? (
+                    {disconnected && !summary && !isHistoricalDay ? (
                       <div className="panel empty">
                         <Radio size={32} />
                         <h2>{names[platform]} is not connected</h2>
@@ -628,7 +621,7 @@ function Workspace({
                           Connect an owned/managed account or a compliant
                           social-listening provider in Settings.
                         </p>
-                        <p>This platform is excluded from all totals.</p>
+                        <p>Stored posts remain available; new posts will not be fetched.</p>
                         <button onClick={() => setView("settings")}>
                           Manage connection
                           <ChevronRight size={16} />

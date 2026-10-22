@@ -433,7 +433,7 @@ main {
   margin: -10px 0 24px;
 }
 .sync-schedule-item {
-  padding: 10px 13px;
+  padding: 12px 13px;
   border: 1px solid #d9e0e8;
   border-radius: 6px;
   background: #fff;
@@ -456,7 +456,7 @@ main {
 }
 .sync-schedule-track {
   height: 5px;
-  margin: 7px 0 5px;
+  margin: 0;
   overflow: hidden;
   border-radius: 999px;
   background: #e6ebf1;
