@@ -643,7 +643,7 @@ async def read_settings(user=Depends(current_user)):
                       'timezone': config().reporting_timezone})
 
 class Preferences(BaseModel):
-    keywords: list[str] = Field(min_length=1, max_length=50)
+    keywords: list[str] = Field(min_length=1, max_length=500)
     x_usernames: list[str] = Field(default_factory=list, max_length=50)
     active_project: str = DEFAULT_MONITORING_PROJECT
     automation_start_hour: int = Field(ge=0, le=22)

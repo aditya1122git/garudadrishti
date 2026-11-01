@@ -249,8 +249,20 @@ async function api(path: string, options: RequestInit = {}) {
     const e = await response
       .json()
       .catch(() => ({ detail: "Service unavailable" }));
+    const validationMessage = Array.isArray(e.detail)
+      ? e.detail
+          .map((item: any) => {
+            const field = Array.isArray(item?.loc)
+              ? item.loc.filter((part: unknown) => part !== "body").join(" → ")
+              : "";
+            return `${field ? `${field}: ` : ""}${item?.msg || "Invalid value"}`;
+          })
+          .join(" · ")
+      : "";
     throw new Error(
-      typeof e.detail === "string" ? e.detail : "Please check the form values",
+      typeof e.detail === "string"
+        ? e.detail
+        : validationMessage || "Please check the form values",
     );
   }
   return response;
@@ -2449,12 +2461,31 @@ function SettingsPanel({
     setSaving(true);
     setError("");
     setMessage("");
+    const normalizedTerms = Array.from(new Map(
+      terms
+        .split(/\r?\n/)
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .map((value) => [value.toLocaleLowerCase("en-IN"), value]),
+    ).values());
+    const normalizedUsernames = Array.from(new Set(
+      xUsernames
+        .split(/\r?\n/)
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ));
+    if (!normalizedTerms.length) {
+      setError("Add at least one keyword or hashtag.");
+      setSaving(false);
+      finishLoading();
+      return;
+    }
     try {
       await json("/settings", {
         method: "PUT",
         body: JSON.stringify({
-          keywords: terms.split("\n").filter(Boolean),
-          x_usernames: xUsernames.split("\n").map((value) => value.trim()).filter(Boolean),
+          keywords: normalizedTerms,
+          x_usernames: normalizedUsernames,
           active_project: activeProject,
           automation_start_hour: startHour,
           automation_end_hour: endHour,
@@ -2464,10 +2495,12 @@ function SettingsPanel({
         ...prefs,
         automation_start_hour: startHour,
         automation_end_hour: endHour,
-        keywords: terms.split("\n").filter(Boolean).map((keyword) => ({ keyword, is_active: true })),
-        x_usernames: xUsernames.split("\n").map((value) => value.trim()).filter(Boolean),
+        keywords: normalizedTerms.map((keyword) => ({ keyword, is_active: true })),
+        x_usernames: normalizedUsernames,
         active_project: activeProject,
       });
+      setTerms(normalizedTerms.join("\n"));
+      setXUsernames(normalizedUsernames.join("\n"));
       setEditing(false);
       setMessage("Settings saved. The automatic schedule has been updated.");
       onSaved();
