@@ -15,7 +15,7 @@ import {
   Bar,
   LabelList,
 } from "recharts";
-import { Eye, EyeSlash, LayoutDashboard, Radio, Settings, Download, Search, ArrowUpRight, TriangleAlert, ChevronRight, LogOut, CalendarDays, Activity, Check, Close, Bell, Menu , PlatformIcon } from "./icons";
+import { Eye, EyeSlash, LayoutDashboard, Radio, Settings, Download, Search, ArrowUpRight, TriangleAlert, ChevronRight, LogOut, CalendarDays, Activity, Check, Close, Bell, Menu, Star, PlatformIcon } from "./icons";
 // @ts-ignore: CSS is handled by the bundler and has no TypeScript declarations.
 import "bootstrap/dist/css/bootstrap.min.css";
 // @ts-ignore: CSS is handled by the bundler and has no TypeScript declarations.
@@ -41,10 +41,14 @@ type Rollup = {
 };
 type Post = {
   _id: string;
+  external_id: string;
   platform: string;
   author: string;
   content: string;
   url: string;
+  media_url?: string;
+  media_type?: string;
+  thumbnail_url?: string;
   published_at: string;
   engagement: {
     likes: number;
@@ -89,6 +93,27 @@ type Overview = {
     historical_count: number;
     historical_top_ten: boolean;
   }[];
+  top_topics?: {
+    topic: string;
+    count: number;
+    positive_count: number;
+    negative_count: number;
+    neutral_count: number;
+    mixed_count: number;
+  }[];
+  top_x_voices?: {
+    author: string;
+    username: string;
+    avatar_url: string;
+    post_count: number;
+    engagement: number;
+    positive_count: number;
+    negative_count: number;
+    neutral_count: number;
+    mixed_count: number;
+  }[];
+  active_project?: string;
+  monitoring_projects?: { id: string; label: string; keywords: string[] }[];
   pending: number;
   threshold: number;
   partial: boolean;
@@ -112,6 +137,65 @@ type SyncScheduleItem = {
   interval_seconds: number;
   next_run_at: string | null;
 };
+const newsChannelDomains: Record<string, string> = {
+  News18: "news18.com",
+  "Zee Bihar": "zeenews.india.com",
+  "ABP Bihar": "abplive.com",
+  "News State": "newsstate.com",
+  "Sahara Samay": "saharasamay.com",
+  "Bihar Tak": "aajtak.in",
+  "First Bihar": "firstbihar.com",
+  "Live Cities": "livecities.news",
+  News4Nation: "news4nation.com",
+  "Hindustani Media": "hindustanimedia.in",
+  "Dainik Jagran Bihar": "jagran.com",
+  "TV9 Bihar/Jharkhand": "tv9hindi.com",
+  "Dainik Bhaskar Bihar": "bhaskar.com",
+  "Prabhat Khabar": "prabhatkhabar.com",
+  "Live Hindustan Bihar": "livehindustan.com",
+  "ETV Bharat Bihar": "etvbharat.com",
+  "Navbharat Times Bihar": "navbharattimes.indiatimes.com",
+  "Aaj Tak": "aajtak.in",
+  "India Today": "indiatoday.in",
+  "NDTV India": "ndtv.in",
+  "Republic Bharat": "republicbharat.com",
+  "CNN-News18": "news18.com",
+  News24: "news24online.com",
+  Bharat24: "bharat24live.com",
+  "DD News": "newsonair.gov.in",
+  ANI: "aninews.in",
+  PTI: "ptinews.com",
+  "Amar Ujala": "amarujala.com",
+  Jansatta: "jansatta.com",
+  "Oneindia Hindi": "hindi.oneindia.com",
+  "Punjab Kesari": "punjabkesari.in",
+  "Times of India": "timesofindia.indiatimes.com",
+  "Hindustan Times": "hindustantimes.com",
+  "Indian Express": "indianexpress.com",
+  "The Hindu": "thehindu.com",
+  "Economic Times": "economictimes.indiatimes.com",
+  "Kashish News": "kashishnews.com",
+};
+const newsChannelLogo = (channel: string) =>
+  `https://www.google.com/s2/favicons?domain=${encodeURIComponent(newsChannelDomains[channel] || channel)}&sz=64`;
+
+function NewsChannelTick({ x = 0, y = 0, payload }: {
+  x?: number;
+  y?: number;
+  payload?: { value?: string };
+}) {
+  const channel = String(payload?.value || "");
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <image href={newsChannelLogo(channel)} x={-11} y={8} width={22} height={22}
+        preserveAspectRatio="xMidYMid meet" />
+      <text x={0} y={43} dy={0} textAnchor="end" transform="rotate(-38 0 43)"
+        fill="#526273" fontSize={10} fontWeight={700}>
+        {channel}
+      </text>
+    </g>
+  );
+}
 const names: Record<string, string> = {
   facebook: "Facebook",
   instagram: "Instagram",
@@ -352,6 +436,7 @@ function Workspace({
     [report, setReport] = useState(false),
     [detail, setDetail] = useState<Alert | null>(null),
     [mobile, setMobile] = useState(false),
+    [collapsed, setCollapsed] = useState(false),
     [selectedDay, setSelectedDay] = useState(""),
     [loadingTasks, setLoadingTasks] = useState(0),
     [loadingMessage, setLoadingMessage] = useState("Loading…");
@@ -418,9 +503,31 @@ function Workspace({
     setView(v);
     setMobile(false);
   };
+  const changeProject = async (projectId: string) => {
+    if (session.role !== "admin" || projectId === data?.active_project) return;
+    const finishLoading = beginLoading("Switching monitoring projectâ€¦");
+    setError("");
+    try {
+      await json("/project", {
+        method: "PUT",
+        body: JSON.stringify({ active_project: projectId }),
+      });
+      setData((current) => current ? { ...current, active_project: projectId } : current);
+      setPlatform("");
+      setSelectedDay("");
+      setRevision((value) => value + 1);
+      setMobile(false);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      finishLoading();
+    }
+  };
   const navigation = [
     ["overview", "Overview", LayoutDashboard],
+    ["analytics", "Analytics", Activity],
     ["feed", "Conversation", Radio],
+    ["voices", "Voices", Star],
     ["alerts", "Alerts", Bell],
     ["settings", "Settings", Settings],
   ] as const;
@@ -428,67 +535,94 @@ function Workspace({
     <GlobalLoadingContext.Provider value={beginLoading}>
     <div className="shell">
       {loadingTasks > 0 && <GlobalLoader message={loadingMessage} />}
-      <header className={mobile ? "app-navbar open" : "app-navbar"}>
-        <div className="navbar-inner">
+      <aside className={`workspace-sidebar${mobile ? " open" : ""}${collapsed ? " collapsed" : ""}`}>
+        <div className="sidebar-brand-row">
           <button
             type="button"
-            className="navbar-brand"
+            className="sidebar-brand"
             aria-label="Go to Overview"
             onClick={() => navigate("overview")}
           >
-            <span className="navbar-logo"><Eye size={22} /></span>
-            <strong>GarudaDrishti</strong>
+            <span className="sidebar-logo"><Eye size={22} /></span>
+            <span><strong>GarudaDrishti</strong><small>SOCIAL INTELLIGENCE</small></span>
           </button>
           <button
-            className="mobile-toggle"
-            aria-label="Toggle navigation"
-            aria-expanded={mobile}
-            onClick={() => setMobile(!mobile)}
+            className="sidebar-collapse"
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={() => setCollapsed((value) => !value)}
           >
-            {mobile ? <Close /> : <Menu />}
+            <ChevronRight size={17} />
           </button>
-          <nav aria-label="Workspace navigation">
-            {navigation.map(([key, label, Icon]) => (
-              <button
-                key={key}
-                className={view === key ? "active" : ""}
-                onClick={() => navigate(key)}
-              >
-                <Icon size={19} />
-                <span>{label}</span>
-                {key === "alerts" && !!data?.alerts.length && (
-                  <b>{data.alerts.length}</b>
-                )}
-              </button>
+          <button
+            className="sidebar-close"
+            aria-label="Close navigation"
+            onClick={() => setMobile(false)}
+          >
+            <Close size={19} />
+          </button>
+        </div>
+        <div className="sidebar-project">
+          <span>PROJECT</span>
+          <select value={data?.active_project || ""}
+            disabled={session.role !== "admin" || !data}
+            onChange={(event) => changeProject(event.target.value)}
+            aria-label="Select monitoring project">
+            {(data?.monitoring_projects || []).map((project) => (
+              <option key={project.id} value={project.id}>{project.label}</option>
             ))}
-          </nav>
-          <div className="navbar-account">
+          </select>
+        </div>
+        <span className="sidebar-section-label">WORKSPACE</span>
+        <nav aria-label="Workspace navigation">
+          {navigation.map(([key, label, Icon]) => (
             <button
-              className="account-profile-button"
+              key={key}
+              className={view === key ? "active" : ""}
+              onClick={() => navigate(key)}
+            >
+              <Icon size={19} />
+              <span>{label}</span>
+              {key === "alerts" && !!data?.alerts.length && (
+                <b>{data.alerts.length}</b>
+              )}
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-account">
+            <button
+              className="sidebar-profile-button"
               title="Open profile"
               aria-label="Open profile"
               onClick={() => navigate("profile")}
             >
               <span className="avatar">{(session.name || session.email)[0].toUpperCase()}</span>
-              <span className="account-copy">
+              <span className="sidebar-account-copy">
                 <strong>{session.name || (session.role === "admin" ? "Administrator" : "Viewer")}</strong>
                 <small>{session.email}</small>
               </span>
             </button>
-            <button title="Sign out" aria-label="Sign out" onClick={logout}>
+            <button className="sidebar-logout" title="Sign out" aria-label="Sign out" onClick={logout}>
               <LogOut size={18} />
             </button>
-          </div>
         </div>
-      </header>
+      </aside>
+      {mobile && <button className="sidebar-scrim" aria-label="Close navigation" onClick={() => setMobile(false)} />}
       <main className="workspace-main">
+        <button className="sidebar-mobile-toggle" aria-label="Open navigation" onClick={() => setMobile(true)}>
+          <Menu size={21} />
+        </button>
         <div className="content">
           <div className="page-heading">
             <div>
               <p className="eyebrow">CM SOCIAL INTELLIGENCE</p>
               <h1>
                 {view === "overview"
-                  ? "Sentiment overview"
+                  ? "Live overview"
+                  : view === "analytics"
+                    ? "Analytics"
+                  : view === "voices"
+                    ? "Voices"
                   : view === "feed"
                     ? "Conversation feed"
                     : view === "alerts"
@@ -500,6 +634,10 @@ function Workspace({
               <p>
                 {view === "overview"
                   ? "The conversation at a glance. Every signal in context."
+                  : view === "analytics"
+                    ? "Sentiment trends, distribution and source intelligence."
+                  : view === "voices"
+                    ? "Performance and sentiment of monitored X accounts."
                   : view === "feed"
                     ? "Explore the posts behind the numbers."
                     : view === "alerts"
@@ -509,7 +647,7 @@ function Workspace({
                         : "Manage the terms and sources you monitor."}
               </p>
             </div>
-            {(view === "overview" || view === "feed") && <div className="heading-actions">
+            {(view === "overview" || view === "analytics" || view === "feed") && <div className="heading-actions">
               {!isHistoricalDay && (
                 <div
                   className={`classification-progress ${!data || data.pending ? "active" : "complete"}`}
@@ -558,6 +696,8 @@ function Workspace({
                     trend={data.trend}
                     onDayChange={(day) => setSelectedDay(day === data.date ? "" : day)}
                   />
+                ) : view === "voices" ? (
+                  <VoicesPage revision={revision} />
                 ) : (
                   <>
                     {active && (
@@ -629,7 +769,7 @@ function Workspace({
                       </div>
                     ) : (
                       <>
-                        {view === "overview" && (
+                        {view === "analytics" && (
                           <>
                             <div className="stats">
                               <Stat
@@ -642,6 +782,7 @@ function Workspace({
                                     ? `Across enabled sources · ${dateLabel(displayedDay)}`
                                     : "No classified data available"
                                 }
+                                tone="total"
                                 icon={<Activity size={18} />}
                               />
                               <Stat
@@ -695,6 +836,7 @@ function Workspace({
                                     : "—"
                                 }
                                 note="Negative ÷ classified posts"
+                                tone="index"
                                 icon={<Eye size={18} />}
                               />
                             </div>
@@ -964,15 +1106,30 @@ function Workspace({
                             </div>
                           </>
                         )}
-                        <Feed
-                          platform={platform}
-                          revision={revision}
-                          defaultDay={data.date}
-                          day={displayedDay}
-                          onDayChange={(day) => setSelectedDay(day === data.date ? "" : day)}
-                          compact={view === "overview"}
-                          onExpand={() => setView("feed")}
-                        />
+                        {view === "overview" && (
+                          <SummaryStats
+                            summary={summary}
+                            displayedDay={displayedDay}
+                            compact
+                          />
+                        )}
+                        {(view === "overview" || view === "feed") && <div className={view === "overview" ? "conversation-monitor-grid" : undefined}>
+                          <Feed
+                            platform={platform}
+                            revision={revision}
+                            defaultDay={data.date}
+                            day={displayedDay}
+                            onDayChange={(day) => setSelectedDay(day === data.date ? "" : day)}
+                            compact={view === "overview"}
+                            onExpand={() => setView("feed")}
+                          />
+                          {view === "overview" && (
+                            <ConversationInsights
+                              topics={data.top_topics || []}
+                              voices={data.top_x_voices || []}
+                            />
+                          )}
+                        </div>}
                       </>
                     )}
                   </>
@@ -1067,6 +1224,282 @@ function Stat({
   );
 }
 
+function SummaryStats({
+  summary,
+  displayedDay,
+  compact = false,
+}: {
+  summary: Rollup | null | undefined;
+  displayedDay: string;
+  compact?: boolean;
+}) {
+  const total = summary?.total_count || 0;
+  const percentage = (value: number) =>
+    total ? `${((value / total) * 100).toFixed(1)}%` : "0.0%";
+
+  return (
+    <div className={`stats${compact ? " compact-stats" : ""}`}>
+      <Stat
+        label="TOTAL CLASSIFIED"
+        value={summary ? num(summary.total_count) : "—"}
+        note={
+          summary
+            ? `Across enabled sources · ${dateLabel(displayedDay)}`
+            : "No classified data available"
+        }
+        tone="total"
+        icon={<Activity size={18} />}
+      />
+      <Stat
+        label="POSITIVE"
+        value={summary ? num(summary.positive_count) : "—"}
+        note={summary ? `${percentage(summary.positive_count)} of classified conversation` : "Awaiting data"}
+        tone="positive"
+      />
+      <Stat
+        label="NEGATIVE"
+        value={summary ? num(summary.negative_count) : "—"}
+        note={summary ? `${percentage(summary.negative_count)} of classified conversation` : "Awaiting data"}
+        tone="negative"
+      />
+      <Stat
+        label="MIXED"
+        value={summary ? num(summary.mixed_count || 0) : "—"}
+        note={summary ? `${percentage(summary.mixed_count || 0)} with both positive and negative stance` : "Awaiting data"}
+        tone="mixed"
+      />
+      <Stat
+        label="NEGATIVITY INDEX"
+        value={summary ? `${summary.negativity_index.toFixed(1)}%` : "—"}
+        note="Negative ÷ classified posts"
+        tone="index"
+        icon={<Eye size={18} />}
+      />
+    </div>
+  );
+}
+
+function ConversationInsights({
+  topics,
+  voices,
+}: {
+  topics: NonNullable<Overview["top_topics"]>;
+  voices: NonNullable<Overview["top_x_voices"]>;
+}) {
+  return (
+    <aside className="conversation-insights" aria-label="Conversation insights">
+      <section className="panel insight-card topics-card">
+        <div className="panel-title">
+          <h2>Top Topics</h2>
+          <span>{topics.reduce((sum, topic) => sum + topic.count, 0)} mentions</span>
+        </div>
+        <div className="topic-list">
+          {topics.length ? topics.map((topic) => {
+            const classified = topic.positive_count + topic.negative_count + topic.neutral_count + topic.mixed_count;
+            const segments = [
+              { label: "positive", value: topic.positive_count },
+              { label: "neutral", value: topic.neutral_count },
+              { label: "mixed", value: topic.mixed_count },
+              { label: "negative", value: topic.negative_count },
+            ];
+            return (
+              <div className="topic-item" key={topic.topic}>
+                <div><strong>{topic.topic}</strong><b>{num(topic.count)}</b></div>
+                <div className="topic-sentiment-bar" aria-label={`${topic.topic}: ${topic.count} mentions`}>
+                  {segments.map(({ label, value }) => {
+                    return value > 0 ? <i key={label} className={label}
+                      style={{ width: `${classified ? value / classified * 100 : 0}%` }} /> : null;
+                  })}
+                </div>
+              </div>
+            );
+          }) : <div className="insight-empty">No topic signals for this date.</div>}
+        </div>
+      </section>
+
+      <section className="panel insight-card voices-card">
+        <div className="panel-title">
+          <h2>Top X Voices</h2>
+          <span>By posts & engagement</span>
+        </div>
+        <div className="voice-list">
+          {voices.length ? voices.map((voice) => {
+            const sentimentCounts = {
+              positive: voice.positive_count,
+              negative: voice.negative_count,
+              neutral: voice.neutral_count,
+              mixed: voice.mixed_count,
+            };
+            const dominant = Object.entries(sentimentCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "neutral";
+            return (
+              <div className="voice-item" key={voice.username || voice.author}>
+                <span className="voice-avatar">
+                  {voice.avatar_url ? (
+                    <img src={voice.avatar_url} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                  ) : (voice.author.trim().charAt(0).toUpperCase() || "X")}
+                </span>
+                <div>
+                  <strong>{voice.author}</strong>
+                  <small>{voice.username ? `@${voice.username}` : "X / Twitter"}</small>
+                </div>
+                <div className="voice-score">
+                  <span className={`voice-dot ${dominant}`} />
+                  <b>{num(voice.post_count)}</b>
+                  <small>{num(voice.engagement)} interactions</small>
+                </div>
+              </div>
+            );
+          }) : <div className="insight-empty">No X voices for this date.</div>}
+        </div>
+      </section>
+    </aside>
+  );
+}
+
+type VoiceRow = {
+  username: string;
+  author: string;
+  avatar_url: string;
+  post_count: number;
+  reach: number;
+  engagement: number;
+  positive_count: number;
+  negative_count: number;
+  neutral_count: number;
+  mixed_count: number;
+};
+
+function VoicesPage({ revision }: { revision: number }) {
+  const beginLoading = React.useContext(GlobalLoadingContext);
+  const [rows, setRows] = useState<VoiceRow[]>([]);
+  const [query, setQuery] = useState("");
+  const [mode, setMode] = useState("reach");
+  const [days, setDays] = useState(7);
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [activityFilter, setActivityFilter] = useState("all");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    const finishLoading = beginLoading("Loading monitored voicesâ€¦");
+    setError("");
+    json(`/voices?days=${days}`)
+      .then((result) => active && setRows(result.items || []))
+      .catch((reason) => active && setError(reason.message))
+      .finally(finishLoading);
+    return () => { active = false; finishLoading(); };
+  }, [days, revision, beginLoading]);
+  const newsHandles = new Set([
+    "ani", "live_cities", "aajtak", "news18bihar", "ani_hindinews", "ians_india",
+    "indianexpress", "zeebiharnews", "tv9bharatvarsh", "ianskhabar", "purneatimes",
+    "bharat24liv",
+  ]);
+  const governmentHandles = new Set([
+    "policebhagalpur", "dmabhagalpur", "dmbhagalpur", "naugachiapolice", "biharss1",
+  ]);
+  const categoryFor = (username: string) => {
+    const key = username.toLowerCase();
+    if (newsHandles.has(key)) return "news";
+    if (governmentHandles.has(key)) return "government";
+    return "politics";
+  };
+  const normalizedQuery = query.trim().replace(/^@/, "").toLowerCase();
+  const visible = rows
+    .filter((voice) => {
+      const matchesSearch = !normalizedQuery ||
+        `${voice.author} ${voice.username}`.toLowerCase().includes(normalizedQuery);
+      const category = categoryFor(voice.username);
+      const matchesCategory = categoryFilter === "all" || category === categoryFilter;
+      const matchesActivity = activityFilter === "all" ||
+        (activityFilter === "active" ? voice.post_count > 0 : voice.post_count === 0);
+      return matchesSearch && matchesCategory && matchesActivity;
+    })
+    .sort((a, b) => {
+      if (mode === "negative") return b.negative_count - a.negative_count || b.post_count - a.post_count;
+      if (mode === "support") return b.positive_count - a.positive_count || b.post_count - a.post_count;
+      if (mode === "engagement") return b.engagement - a.engagement || b.reach - a.reach;
+      return b.reach - a.reach || b.post_count - a.post_count;
+    });
+  return (
+    <section className="panel voices-page">
+      <div className="voices-toolbar">
+        <div className="voices-tabs">
+          {[["reach", "Top by Reach"], ["negative", "Negative Voices"],
+            ["support", "Support Voices"], ["engagement", "Engagement Score"]].map(([key, label]) => (
+            <button key={key} className={mode === key ? "active" : ""} onClick={() => setMode(key)}>{label}</button>
+          ))}
+        </div>
+        <span>{rows.length} monitored accounts</span>
+      </div>
+      <div className="voices-filters">
+        <label className="search"><Search size={17} /><input className="form-control" value={query}
+          onChange={(event) => setQuery(event.target.value)} placeholder="Search by account, name or @username…"
+          aria-label="Search monitored X accounts" /></label>
+        <select className="form-select" value={categoryFilter}
+          onChange={(event) => setCategoryFilter(event.target.value)} aria-label="Filter voice category">
+          <option value="all">All categories</option>
+          <option value="news">News &amp; Media</option>
+          <option value="government">Government</option>
+          <option value="politics">Politics &amp; Public Affairs</option>
+        </select>
+        <select className="form-select" value={activityFilter}
+          onChange={(event) => setActivityFilter(event.target.value)} aria-label="Filter voice activity">
+          <option value="all">All activity</option>
+          <option value="active">Has posts</option>
+          <option value="inactive">No posts</option>
+        </select>
+        <select className="form-select" value={days} onChange={(event) => setDays(Number(event.target.value))}>
+          <option value={1}>Last 24 hours</option>
+          <option value={7}>Last 7 days</option>
+          <option value={30}>Last 30 days</option>
+        </select>
+        {(query || categoryFilter !== "all" || activityFilter !== "all") && (
+          <button className="voices-clear" type="button" onClick={() => {
+            setQuery("");
+            setCategoryFilter("all");
+            setActivityFilter("all");
+          }}>Clear</button>
+        )}
+      </div>
+      {error ? <p className="error">{error}</p> : <div className="voices-table">
+        <div className="voices-table-head">
+          <span>#</span><span>ACCOUNT</span><span>TYPE</span><span>MENTIONS</span>
+          <span>REACH</span><span>ENGAGEMENT</span><span>SENTIMENT MIX</span>
+        </div>
+        {visible.map((voice, index) => {
+          const total = voice.positive_count + voice.negative_count + voice.neutral_count + voice.mixed_count;
+          const positive = total ? voice.positive_count / total * 100 : 0;
+          const negative = total ? voice.negative_count / total * 100 : 0;
+          const neutral = Math.max(0, 100 - positive - negative);
+          const categoryKey = categoryFor(voice.username);
+          const category = categoryKey === "news" ? "News & Media" : categoryKey === "government"
+            ? "Government" : "Politics & Public Affairs";
+          const avatar = voice.avatar_url || `https://unavatar.io/twitter/${encodeURIComponent(voice.username)}`;
+          return <div className="voices-table-row" key={voice.username}>
+            <span className="voice-rank">{index + 1}</span>
+            <div className="voice-account">
+              <span className="voice-page-avatar">{voice.username[0]?.toUpperCase()}
+                <img src={avatar} alt="" loading="lazy" referrerPolicy="no-referrer"
+                  onError={(event) => { event.currentTarget.style.display = "none"; }} />
+              </span>
+              <div><strong>@{voice.username}</strong><small>{voice.author}</small></div>
+            </div>
+            <span className={`voice-category ${categoryKey}`}>{category}</span>
+            <b>{num(voice.post_count)}</b><span>{num(voice.reach)}</span><span>{num(voice.engagement)}</span>
+            <div className="voice-sentiment-mix">
+              <small>{Math.round(positive)}% pos Â· {Math.round(negative)}% neg</small>
+              <div><i style={{ width: `${positive}%` }} /><i style={{ width: `${negative}%` }} />
+                <i style={{ width: `${neutral}%` }} /></div>
+            </div>
+          </div>;
+        })}
+        {!visible.length && (
+          <div className="voices-empty">No monitored accounts match these filters.</div>
+        )}
+      </div>}
+    </section>
+  );
+}
+
 function NewsChannelChart({
   rows,
   day,
@@ -1111,8 +1544,8 @@ function NewsChannelChart({
                 </linearGradient>
               </defs>
               <CartesianGrid vertical={false} stroke="#eee4dc" strokeDasharray="4 5" />
-              <XAxis dataKey="channel" interval={0} angle={-38} textAnchor="end" tickLine={false}
-                axisLine={false} tick={{ fontSize: 10, fill: "#526273", fontWeight: 700 }} />
+              <XAxis dataKey="channel" interval={0} tickLine={false}
+                axisLine={false} tick={<NewsChannelTick />} />
               <YAxis allowDecimals={false} tickLine={false} axisLine={false}
                 tick={{ fontSize: 12, fill: "#718096" }} />
               <Tooltip formatter={(value, name) => [num(Number(value)), name]}
@@ -1219,6 +1652,56 @@ function AlertCentre({
   );
 }
 
+function PostPreview({ post }: { post: Post }) {
+  const youtubeThumbnail = post.platform === "youtube" && post.external_id
+    ? `https://i.ytimg.com/vi/${encodeURIComponent(post.external_id)}/hqdefault.jpg`
+    : "";
+  const thumbnail = post.thumbnail_url || youtubeThumbnail || (post.media_type === "image" ? post.media_url : "");
+  const playableVideo = post.media_type === "video" && post.media_url && !thumbnail;
+  if (!thumbnail && !playableVideo) return null;
+  const media = thumbnail ? (
+    <img src={thumbnail} alt="" loading="lazy" referrerPolicy="no-referrer"
+      onError={(event) => { event.currentTarget.parentElement?.classList.add("media-error"); }} />
+  ) : (
+    <video src={post.media_url} controls preload="metadata" />
+  );
+  return post.url && /^https:\/\//.test(post.url) ? (
+    <a className="post-media-preview" href={post.url} target="_blank" rel="noreferrer">
+      {media}
+      {post.media_type === "video" && <span>Video</span>}
+    </a>
+  ) : (
+    <div className="post-media-preview">
+      {media}
+      {post.media_type === "video" && <span>Video</span>}
+    </div>
+  );
+}
+
+function PostInlineMeta({ post }: { post: Post }) {
+  const label = post.sentiment?.label;
+  return (
+    <div className="post-inline-meta">
+      {label ? (
+        <span className={`sentiment ${label}`} title={post.sentiment?.reason}>
+          {label}<b>{Math.round((post.sentiment?.confidence || 0) * 100)}%</b>
+        </span>
+      ) : (
+        <span className="sentiment pending">
+          {post.classification_status === "awaiting_gemini" ? "Awaiting Gemini" : "Pending"}
+        </span>
+      )}
+      <span><Activity size={13} />{num(post.engagement_score)} interactions</span>
+      <span><CalendarDays size={13} />
+        {new Date(post.published_at).toLocaleString("en-IN", {
+          day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+          timeZone: "Asia/Kolkata",
+        })}
+      </span>
+    </div>
+  );
+}
+
 function AlertNegativePosts({ day }: { day: string }) {
   const [page, setPage] = useState(1);
   const [posts, setPosts] = useState<{ items: Post[]; total: number } | null>(null);
@@ -1269,6 +1752,8 @@ function AlertNegativePosts({ day }: { day: string }) {
                   <b>{post.author}</b>
                   <span>{names[post.platform]}</span>
                 </div>
+                <PostInlineMeta post={post} />
+                <PostPreview post={post} />
                 <p className={contentExpandable && !contentExpanded ? "post-content compact" : "post-content"}>
                   {post.content}
                 </p>
@@ -1359,6 +1844,7 @@ function Feed({
   const [expandedPosts, setExpandedPosts] = useState<Set<string>>(
     () => new Set(),
   );
+  const pageSize = compact ? 4 : 20;
   useEffect(() => {
     const t = setTimeout(() => setTerm(q), 300);
     return () => clearTimeout(t);
@@ -1373,7 +1859,12 @@ function Feed({
     const finishLoading = beginLoading("Loading conversations…");
     setError("");
     setLoading(true);
-    const p = new URLSearchParams({ q: term, sort, page: String(page) });
+    const p = new URLSearchParams({
+      q: term,
+      sort,
+      page: String(page),
+      page_size: String(pageSize),
+    });
     if (platform) p.set("platform", platform);
     if (sentiment) p.set("sentiment", sentiment);
     if (day) p.set("day", day);
@@ -1388,7 +1879,7 @@ function Feed({
       active = false;
       finishLoading();
     };
-  }, [platform, term, sentiment, sort, page, revision, day, beginLoading]);
+  }, [platform, term, sentiment, sort, page, revision, day, beginLoading, pageSize]);
   return (
     <section className="panel feed">
       <div className="panel-title">
@@ -1463,7 +1954,7 @@ function Feed({
             <span>INTERACTIONS</span>
             <span>POSTED · IST</span>
           </div>
-          {posts?.items.slice(0, compact ? 4 : 20).map((p) => {
+          {posts?.items.map((p) => {
             const contentExpandable =
               p.content.length > 300 || p.content.split(/\r?\n/).length > 3;
             const contentExpanded = expandedPosts.has(p._id);
@@ -1479,6 +1970,8 @@ function Feed({
                     {names[p.platform]}
                   </span>
                 </div>
+                <PostInlineMeta post={p} />
+                <PostPreview post={p} />
                 <p
                   className={
                     contentExpandable && !contentExpanded
@@ -1561,16 +2054,16 @@ function Feed({
           })}
         </div>
       )}
-      {!compact && posts && (
+      {posts && posts.total > pageSize && (
         <div className="pagination">
           <span>
-            Page {page} of {Math.max(1, Math.ceil(posts.total / 20))}
+            Page {page} of {Math.max(1, Math.ceil(posts.total / pageSize))}
           </span>
           <button disabled={page === 1} onClick={() => setPage((p) => p - 1)}>
             Previous
           </button>
           <button
-            disabled={page * 20 >= posts.total}
+            disabled={page * pageSize >= posts.total}
             onClick={() => setPage((p) => p + 1)}
           >
             Next
@@ -1920,6 +2413,8 @@ function SettingsPanel({
   const beginLoading = React.useContext(GlobalLoadingContext);
   const [prefs, setPrefs] = useState<any>(null),
     [terms, setTerms] = useState(""),
+    [xUsernames, setXUsernames] = useState(""),
+    [activeProject, setActiveProject] = useState(""),
     [startHour, setStartHour] = useState(6),
     [endHour, setEndHour] = useState(22),
     [editing, setEditing] = useState(false),
@@ -1933,6 +2428,8 @@ function SettingsPanel({
         setPrefs(p);
         setStartHour(p.automation_start_hour ?? 6);
         setEndHour(p.automation_end_hour ?? 22);
+        setXUsernames((p.x_usernames || []).join("\n"));
+        setActiveProject(p.active_project || p.monitoring_projects?.[0]?.id || "");
         setTerms(
           p.keywords
             .filter((k: any) => k.is_active)
@@ -1957,6 +2454,8 @@ function SettingsPanel({
         method: "PUT",
         body: JSON.stringify({
           keywords: terms.split("\n").filter(Boolean),
+          x_usernames: xUsernames.split("\n").map((value) => value.trim()).filter(Boolean),
+          active_project: activeProject,
           automation_start_hour: startHour,
           automation_end_hour: endHour,
         }),
@@ -1966,6 +2465,8 @@ function SettingsPanel({
         automation_start_hour: startHour,
         automation_end_hour: endHour,
         keywords: terms.split("\n").filter(Boolean).map((keyword) => ({ keyword, is_active: true })),
+        x_usernames: xUsernames.split("\n").map((value) => value.trim()).filter(Boolean),
+        active_project: activeProject,
       });
       setEditing(false);
       setMessage("Settings saved. The automatic schedule has been updated.");
@@ -1977,6 +2478,9 @@ function SettingsPanel({
       finishLoading();
     }
   }
+  const selectedProject = (prefs.monitoring_projects || []).find(
+    (project: any) => project.id === activeProject,
+  );
   return (
     <>
       <form onSubmit={save} className="settings-grid" autoComplete="off">
@@ -1987,6 +2491,26 @@ function SettingsPanel({
               onClick={() => { setEditing(true); setMessage(""); setError(""); }}>Edit settings</button>}
           </div>
 
+          <div className="monitoring-project-editor">
+            <label>
+              Monitoring project
+              <select className="form-select" value={activeProject}
+                disabled={!admin || !editing}
+                onChange={(e) => setActiveProject(e.target.value)}>
+                {(prefs.monitoring_projects || []).map((project: any) => (
+                  <option key={project.id} value={project.id}>{project.label}</option>
+                ))}
+              </select>
+              <small>The selected project&apos;s additional keywords are combined with the existing keywords below for every source.</small>
+            </label>
+            {selectedProject && (
+              <div className="project-keyword-preview">
+                <strong>{selectedProject.keywords.length} additional keywords</strong>
+                <p>{selectedProject.keywords.join(" · ")}</p>
+              </div>
+            )}
+          </div>
+
           <label>
             Keywords and hashtags
             <textarea className="form-control"
@@ -1995,6 +2519,17 @@ function SettingsPanel({
               onChange={(e) => setTerms(e.target.value)}
               disabled={!admin || !editing}
             />
+          </label>
+          <label>
+            X / Twitter accounts to monitor
+            <textarea className="form-control x-account-input"
+              rows={4}
+              placeholder={"samrat4bjp\nBJP4Bihar\nusername"}
+              value={xUsernames}
+              onChange={(e) => setXUsernames(e.target.value)}
+              disabled={!admin || !editing}
+            />
+            <small>One username per line. The account’s own posts are fetched even when they do not contain a tracked keyword.</small>
           </label>
           <div className="schedule-editor">
             <div>
@@ -2033,6 +2568,8 @@ function SettingsPanel({
           {admin && editing ? (<>
             <button type="button" className="btn btn-light" disabled={saving} onClick={() => {
               setTerms(prefs.keywords.filter((k: any) => k.is_active).map((k: any) => k.keyword).join("\n"));
+              setXUsernames((prefs.x_usernames || []).join("\n"));
+              setActiveProject(prefs.active_project || prefs.monitoring_projects?.[0]?.id || "");
               setStartHour(prefs.automation_start_hour ?? 6);
               setEndHour(prefs.automation_end_hour ?? 22);
               setEditing(false);

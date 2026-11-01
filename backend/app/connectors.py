@@ -40,7 +40,15 @@ NEWS_LOCALES = (
     {'hl': 'en-IN', 'gl': 'IN', 'ceid': 'IN:en'},
 )
 
+BIHAR_DISCOVERY_TERMS = (
+    'Bihar', 'बिहार', '#Bihar', '#BiharNews',
+    'Bihar News', 'बिहार न्यूज़', 'Bihar Politics', 'बिहार राजनीति',
+    'Patna', 'पटना',
+)
+BIHAR_WIDE_NEWS_QUERY = '"Bihar" OR "बिहार"'
+
 NEWS_SEARCH_QUERIES = (
+    BIHAR_WIDE_NEWS_QUERY,
     '"Samrat Choudhary" OR "Samrat Chaudhary"',
     '"Bihar BJP" OR "BJP Bihar"',
     '"Bihar Government" OR "Bihar Govt"',
@@ -48,6 +56,9 @@ NEWS_SEARCH_QUERIES = (
 )
 
 YOUTUBE_SEARCH_TERMS = (
+    'Bihar',
+    'बिहार',
+    'Bihar News',
     'Samrat Choudhary',
     'Bihar BJP',
     'Bihar Government',
@@ -55,6 +66,8 @@ YOUTUBE_SEARCH_TERMS = (
 )
 
 X_SEARCH_GROUPS = (
+    (('Bihar', 'बिहार', '#Bihar', '#BiharNews', 'Bihar News'),
+     ('Bihar', 'बिहार', '#Bihar', '#BiharNews', 'Bihar News', 'Bihar Politics', 'Patna', 'पटना')),
     (('Samrat Choudhary', 'Samrat Chaudhary', '#SamratChoudhary'),
      ('Samrat Choudhary', 'Samrat Chaudhary', 'CM Samrat',
       '#SamratChoudhary', '#SamratChaudhary', '#CMSamrat')),
@@ -76,6 +89,7 @@ X_MATCH_ALIASES = ('CM Samrat', '#CMSamrat', '@samrat4bjp', '@BJP4Bihar', 'स�
 X_OFFICIAL_HANDLES = {'samrat4bjp', 'bjp4bihar'}
 
 REDDIT_SEARCH_GROUPS = (
+    (('Bihar', 'बिहार', 'Bihar News', '#Bihar', '#BiharNews'), 'Bihar'),
     (('Samrat Choudhary', 'Samrat Chaudhary', 'सम्राट चौधरी'),
      'Samrat Choudhary'),
     (('Bihar BJP', 'BJP Bihar', 'Bharatiya Janata Party Bihar', 'बिहार भाजपा', 'भाजपा बिहार'),
@@ -214,6 +228,17 @@ def matches(text, keywords):
     return any(re.search(r'(?<!\w)' + re.escape(k) + r'(?!\w)', text, re.I) for k in keywords)
 
 
+def _prioritized_bihar_keywords(keywords):
+    """Keep broad Bihar discovery terms inside provider query-count limits."""
+    active = {str(keyword).strip().casefold() for keyword in keywords if str(keyword).strip()}
+    priority = [term for term in BIHAR_DISCOVERY_TERMS if term.casefold() in active]
+    priority_keys = {term.casefold() for term in priority}
+    return priority + [
+        str(keyword).strip() for keyword in keywords
+        if str(keyword).strip() and str(keyword).strip().casefold() not in priority_keys
+    ]
+
+
 def post(platform, external_id, author, content, url, timestamp, engagement=None):
     metrics = {k: int((engagement or {}).get(k, 0)) for k in ('likes', 'comments', 'shares', 'views')}
     return dict(schema_version=1, platform=platform, external_id=str(external_id), author=author,
@@ -222,7 +247,7 @@ def post(platform, external_id, author, content, url, timestamp, engagement=None
                 ingested_at=datetime.now(timezone.utc), sentiment=None, demo=False)
 
 
-async def youtube_posts(client, secret, keywords, since):
+async def youtube_posts(client, secret, keywords, since, project_keywords=()):
     base = 'https://www.googleapis.com/youtube/v3/'
     keys = list(dict.fromkeys(filter(None, (
         str(secret.get('api_key', '')).strip(),
@@ -249,7 +274,9 @@ async def youtube_posts(client, secret, keywords, since):
     # YouTube returns an empty result set for very large OR expressions even
     # though compact entity searches work. Use one stable discovery query;
     # the complete editable keyword set still filters returned video titles.
-    query_terms = list(YOUTUBE_SEARCH_TERMS)
+    # Keep the stable Bihar discovery query and add a bounded selection from
+    # the active project. A very large YouTube OR expression returns no rows.
+    query_terms = list(dict.fromkeys([*YOUTUBE_SEARCH_TERMS, *list(project_keywords)[:6]]))
     search_params = dict(
         part='snippet', type='video', order='date', maxResults=50,
         q='|'.join(query_terms), publishedAfter=since.isoformat().replace('+00:00', 'Z'),
@@ -296,6 +323,12 @@ async def youtube_posts(client, secret, keywords, since):
             short_candidate = duration_seconds is not None and duration_seconds < 240
             row.update(content_type='short' if short_candidate else 'video', title=title,
                        description=description,
+                       media_type='video',
+                       thumbnail_url=str(_first(
+                           snippet, 'thumbnails.maxres.url', 'thumbnails.standard.url',
+                           'thumbnails.high.url', 'thumbnails.medium.url',
+                           'thumbnails.default.url', default='',
+                       )),
                        discovery=sorted(videos[vid]),
                        content_scope='youtube-title-description-v3')
             rows.append(row)
@@ -308,7 +341,7 @@ def _rss_text(value):
     return ' '.join(clean.split())
 
 
-async def google_news_posts(client, keywords, since):
+async def google_news_posts(client, keywords, since, project_keywords=()):
     """Fetch approved Bihar publishers from Google News public RSS search feeds."""
     lookback_days = min(7, max(1, math.ceil((datetime.now(timezone.utc) - since).total_seconds() / 86400)))
 
@@ -333,7 +366,7 @@ async def google_news_posts(client, keywords, since):
             title = _rss_text(item.findtext('title'))
             suffix = f' - {source}'
             headline = title[:-len(suffix)].strip() if source and title.endswith(suffix) else title
-            if not headline or not matches(headline, keywords):
+            if not headline or not (matches(headline, keywords) or entity_query == BIHAR_WIDE_NEWS_QUERY):
                 continue
             try:
                 published = parsedate_to_datetime(item.findtext('pubDate') or '').astimezone(timezone.utc)
@@ -349,8 +382,13 @@ async def google_news_posts(client, keywords, since):
             found.append(row)
         return found
 
+    project_terms = list(dict.fromkeys(
+        str(value).strip() for value in project_keywords if str(value).strip()
+    ))[:12]
+    project_query = ' OR '.join(f'"{term}"' for term in project_terms)
+    search_queries = [*NEWS_SEARCH_QUERIES, *([project_query] if project_query else [])]
     results = await asyncio.gather(*(
-        fetch(query, locale) for query in NEWS_SEARCH_QUERIES for locale in NEWS_LOCALES
+        fetch(query, locale) for query in search_queries for locale in NEWS_LOCALES
     ))
     unique = {}
     for rows in results:
@@ -364,10 +402,13 @@ def _first(item, *paths, default=None):
     for path in paths:
         value = item
         for part in path.split('.'):
-            if not isinstance(value, dict) or part not in value:
+            if isinstance(value, dict) and part in value:
+                value = value[part]
+            elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
+                value = value[int(part)]
+            else:
                 value = None
                 break
-            value = value[part]
         if value not in (None, ''):
             return value
     return default
@@ -416,6 +457,12 @@ def _timestamp(value):
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
+        try:
+            # X/Twitter Actors commonly return: Sun Nov 01 04:31:37 +0000 2026
+            parsed = datetime.strptime(text, '%a %b %d %H:%M:%S %z %Y')
+        except ValueError:
+            parsed = None
+    if parsed is None:
         # RFC 2822 is common in RSS/news Actor output.
         from email.utils import parsedate_to_datetime
         try:
@@ -425,14 +472,20 @@ def _timestamp(value):
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
 
-def _actor_input(platform, keywords, since, max_items):
+def _actor_input(platform, keywords, since, max_items, x_usernames=(), project_keywords=()):
     """Build inputs for the fixed, tested Apify Actors."""
     since_iso = since.isoformat().replace('+00:00', 'Z')
     if platform == 'instagram':
         # Direct hashtag URLs make the Instagram Scraper return post objects.
         # Its generic `search` input returns hashtag summary objects instead.
         searches = []
-        for keyword in keywords[:10]:
+        broad_keywords = _prioritized_bihar_keywords(keywords)
+        discovery_keywords = list(dict.fromkeys([
+            *broad_keywords[:4],
+            *[str(value).strip() for value in project_keywords if str(value).strip()],
+            *broad_keywords[4:],
+        ]))
+        for keyword in discovery_keywords[:10]:
             tag = re.sub(r'[^\w]+', '', keyword.lstrip('#'), flags=re.UNICODE)
             if tag and tag.casefold() not in {value.casefold() for value in searches}:
                 searches.append(tag)
@@ -465,6 +518,18 @@ def _actor_input(platform, keywords, since, max_items):
             )
             query = f'{query} OR {operators}' if operators else query
             search_terms.append(f'({query}) since:{since.date().isoformat()}')
+        for username in x_usernames:
+            handle = re.sub(r'[^A-Za-z0-9_]', '', str(username).lstrip('@'))
+            if handle:
+                search_terms.append(f'from:{handle} since:{since.date().isoformat()}')
+        project_terms = list(dict.fromkeys(
+            str(value).strip() for value in project_keywords if str(value).strip()
+        ))
+        for offset in range(0, len(project_terms), 5):
+            group = project_terms[offset:offset + 5]
+            query = ' OR '.join(f'"{term}"' for term in group)
+            search_terms.append(f'({query}) since:{since.date().isoformat()}')
+        search_terms = list(dict.fromkeys(search_terms))
         if not search_terms:
             raise ProviderError('No supported X search terms are active')
         return {'searchTerms': search_terms, 'maxItems': max_items, 'sort': 'Latest + Top'}
@@ -472,6 +537,10 @@ def _actor_input(platform, keywords, since, max_items):
         active = {keyword.strip().casefold() for keyword in keywords if keyword.strip()}
         active_queries = [query for triggers, query in REDDIT_SEARCH_GROUPS
                           if any(trigger.casefold() in active for trigger in triggers)]
+        active_queries.extend(
+            str(value).strip() for value in list(project_keywords)[:8] if str(value).strip()
+        )
+        active_queries = list(dict.fromkeys(active_queries))
         if not active_queries:
             raise ProviderError('No Reddit search terms are active')
         lookback_seconds = max(0, (datetime.now(timezone.utc) - since).total_seconds())
@@ -494,7 +563,7 @@ def _actor_input(platform, keywords, since, max_items):
     raise ProviderError(f'Unsupported direct Apify input for {platform}')
 
 
-def _apify_item(platform, item, keywords, since):
+def _apify_item(platform, item, keywords, since, x_usernames=()):
     if not isinstance(item, dict):
         return None
     if platform == 'reddit' and str(item.get('dataType', 'post')).casefold() != 'post':
@@ -513,9 +582,12 @@ def _apify_item(platform, item, keywords, since):
         content, [*keywords, *X_MATCH_ALIASES] if platform == 'x' else keywords,
     ) if content else False
     official_x_post = platform == 'x' and author_handle in X_OFFICIAL_HANDLES
+    tracked_x_post = platform == 'x' and author_handle in {
+        str(username).strip().lstrip('@').casefold() for username in x_usernames
+    }
     if not content:
         return None
-    if not (content_matches or official_x_post):
+    if not (content_matches or official_x_post or tracked_x_post):
         return None
     published = _timestamp(_first(item, 'publishedAt', 'published_at', 'createdAt', 'created_at', 'created_utc',
                                   'takenAt', 'date_utc', 'timestamp', 'date', 'time', 'timeCreated',
@@ -529,6 +601,34 @@ def _apify_item(platform, item, keywords, since):
     author = _author_name(_first(item, 'authorName', 'pageName', 'author.name', 'author.userName', 'author.username',
                                 'author', 'ownerUsername', 'username', 'fullName', 'user.pageName', 'user.name', 'user',
                                 'channelName', 'source', 'publisher', default='Unknown'))
+    author_avatar_url = str(_first(
+        item, 'author.profilePicture', 'author.profileImageUrl', 'author.avatar',
+        'user.profile_image_url_https', 'user.profileImageUrl', 'user.avatar',
+        'profilePicUrl', 'profilePicture', 'avatar', default='',
+    )).strip()
+    if not author_avatar_url.startswith(('https://', 'http://')):
+        author_avatar_url = ''
+    video_url = html.unescape(str(_first(
+        item, 'videoUrl', 'video.url', 'video.0.url', 'videos.0.url', 'videos.0',
+        'media.0.videoUrl',
+        'extendedEntities.media.0.video_info.variants.0.url', default='',
+    ))).strip()
+    image_url = html.unescape(str(_first(
+        item, 'displayUrl', 'imageUrl', 'thumbnailUrl', 'thumbnail.url', 'thumbnail',
+        'images.0.url', 'images.0', 'childPosts.0.displayUrl',
+        'media.0.thumbnail', 'media.1.thumbnail', 'media.2.thumbnail',
+        'media.0.mediaUrl', 'media.0.url', 'media.0',
+        'media.0.photo_image.uri', 'extendedEntities.media.0.media_url_https',
+        'card.binding_values.thumbnail_image.image_value.url',
+        'preview.images.0.source.url', 'gallery_images.0.url',
+        'attachments.0.url', default='',
+    ))).strip()
+    if not video_url.startswith(('https://', 'http://')):
+        video_url = ''
+    if not image_url.startswith(('https://', 'http://')):
+        image_url = ''
+    if not image_url and re.search(r'\.(?:jpe?g|png|webp|gif)(?:\?|$)', url, re.I):
+        image_url = url
     engagement = dict(
         likes=_number(item, 'likesCount', 'likeCount', 'reactionCount', 'likes', 'upVotes', 'score', 'favoriteCount', 'stats.likes', 'reactions_count', 'public_metrics.like_count'),
         comments=_number(item, 'commentsCount', 'commentCount', 'comments', 'numberOfComments', 'numComments', 'num_comments', 'replyCount', 'stats.comments', 'comments_count', 'public_metrics.reply_count'),
@@ -538,8 +638,11 @@ def _apify_item(platform, item, keywords, since):
     row = post(platform, external_id, author, content, url, published.isoformat(), engagement)
     row.update(source_provider='apify', content_scope=(
         'reddit-public-post-v1' if platform == 'reddit' else 'apify-public-post-v1'
-    ), caption=content,
-        _caption_keyword_match=content_matches, _official_x_post=official_x_post)
+    ), caption=content, author_handle=author_handle, author_avatar_url=author_avatar_url,
+        media_url=video_url or image_url, thumbnail_url=image_url,
+        media_type='video' if video_url else ('image' if image_url else ''),
+        _caption_keyword_match=content_matches,
+        _official_x_post=official_x_post or tracked_x_post)
     return row
 
 
@@ -557,7 +660,7 @@ async def _run_apify_actor(client, actor_id, api_key, payload, limit):
     return data
 
 
-async def apify_posts(client, platform, secret, keywords, since):
+async def apify_posts(client, platform, secret, keywords, since, x_usernames=(), project_keywords=()):
     """Run the configured Apify Actors and normalize public social posts."""
     api_key = str(secret.get('api_key', '')).strip()
     if not api_key:
@@ -567,7 +670,10 @@ async def apify_posts(client, platform, secret, keywords, since):
         # The official Posts Actor accepts page/profile URLs, not keywords.
         # Discover matching public pages first, then fetch their latest posts.
         discovery = await _run_apify_actor(client, APIFY_FACEBOOK_DISCOVERY_ACTOR, api_key, {
-            'categories': keywords[:10],
+            'categories': list(dict.fromkeys([
+                *[str(value).strip() for value in project_keywords if str(value).strip()],
+                *_prioritized_bihar_keywords(keywords),
+            ]))[:10],
             # Discover relevant public pages across India. Post bodies are
             # still filtered against the tracked Bihar-focused keywords.
             'locations': ['India'],
@@ -587,7 +693,9 @@ async def apify_posts(client, platform, secret, keywords, since):
             'onlyPostsNewerThan': since.isoformat().replace('+00:00', 'Z'),
         }
     else:
-        payload = _actor_input(platform, keywords, since, max_items)
+        payload = _actor_input(
+            platform, keywords, since, max_items, x_usernames, project_keywords,
+        )
     data = await _run_apify_actor(
         client, DEFAULT_APIFY_ACTORS[platform], api_key, payload, max_items,
     )
@@ -595,7 +703,7 @@ async def apify_posts(client, platform, secret, keywords, since):
     invalid = 0
     for item in data:
         try:
-            row = _apify_item(platform, item, keywords, since)
+            row = _apify_item(platform, item, keywords, since, x_usernames)
         except ProviderError:
             invalid += 1
             continue

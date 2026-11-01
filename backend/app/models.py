@@ -33,6 +33,11 @@ class Post(Document):
     platform: Platform
     external_id: str
     author: str
+    author_handle: str = ''
+    author_avatar_url: str = ''
+    media_url: str = ''
+    media_type: str = ''
+    thumbnail_url: str = ''
     content: str
     caption: str = ''
     url: str

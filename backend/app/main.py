@@ -2,6 +2,8 @@ import asyncio
 import csv
 import io
 import logging
+import re
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import timedelta, date
 import bcrypt
@@ -23,13 +25,109 @@ from .config import (config, APIFY_SYNC_INTERVAL_HOURS, DEFAULT_AUTOMATION_START
 from .connectors import _author_name, NEWS_CHANNELS, canonical_news_source
 from .sentiment import classifier_status
 from .models import DOCUMENTS, now, Platform, Label
-from .services import (POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, PLATFORMS,
+from .services import (POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, DEFAULT_X_USERNAMES,
+                       MONITORING_PROJECTS, DEFAULT_MONITORING_PROJECT, PLATFORMS,
                        TRACKING_SCOPE_VERSION, YOUTUBE_CONTENT_SCOPE,
                        YOUTUBE_SEARCH_STRATEGY, analytics_platforms, today, bounds, settings, encrypt,
                        audit, statuses, seed, sync, scheduled_sync, sync_running)
 from .reporting import build_sentiment_pdf
 
 logger = logging.getLogger(__name__)
+
+TOPIC_RULES = (
+    ('Samrat Choudhary', r'samrat\s*(?:choudhary|chaudhary)|सम्राट\s*चौधरी'),
+    ('Bihar Government', r'bihar\s*(?:government|govt)|government\s+of\s+bihar|बिहार\s*सरकार'),
+    ('Bihar BJP', r'bihar\s*bjp|bjp\s*bihar|bjp4bihar|बिहार\s*भाजपा|भाजपा\s*बिहार'),
+    ('Elections', r'\belections?\b|\bchunav\b|चुनाव|मतदान'),
+    ('Jobs & Employment', r'\bjobs?\b|employment|बेरोजगार|रोजगार|नौकरी'),
+    ('Education', r'education|school|college|शिक्षा|विद्यालय|स्कूल'),
+    ('Law & Order', r'law\s*(?:and|&)\s*order|crime|police|अपराध|पुलिस|कानून\s*व्यवस्था'),
+    ('Flood & Weather', r'flood|weather|rain|बाढ़|बारिश|मौसम'),
+    ('Roads & Transport', r'roads?|transport|traffic|सड़क|यातायात|परिवहन'),
+    ('Health', r'health|hospital|doctor|स्वास्थ्य|अस्पताल|डॉक्टर'),
+    ('Development', r'development|infrastructure|विकास|बुनियादी\s*ढांचा'),
+    ('Patna', r'\bpatna\b|पटना'),
+)
+TOPIC_STOP_HASHTAGS = {
+    'bihar', 'biharnews', 'news', 'viral', 'trending', 'shorts', 'india',
+    'बिहार', 'बिहारन्यूज', 'न्यूज',
+}
+def project_content_clause(project_id):
+    if project_id == 'all':
+        return None
+    keywords = MONITORING_PROJECTS.get(project_id, {}).get('keywords', [])
+    if not keywords:
+        return None
+    return {'content': {'$regex': '|'.join(re.escape(term) for term in keywords), '$options': 'i'}}
+
+
+async def conversation_insights(database, start, end, selected_platforms, project_id):
+    """Build deterministic topic and X-author summaries from stored posts."""
+    sentiment_keys = ('positive', 'negative', 'neutral', 'mixed')
+    topic_stats = defaultdict(lambda: {**{f'{label}_count': 0 for label in sentiment_keys}, 'count': 0})
+    topic_query = {
+        **POST_SCOPE,
+        'published_at': {'$gte': start, '$lt': end},
+        'platform': {'$in': selected_platforms},
+        'demo': config().seed_mock_data,
+        'sentiment.label': {'$in': list(sentiment_keys)},
+    }
+    project_clause = project_content_clause(project_id)
+    if project_clause:
+        topic_query = {'$and': [topic_query, project_clause]}
+    async for row in database.posts.find(topic_query, {'content': 1, 'sentiment.label': 1}):
+        text = str(row.get('content') or '')
+        topics = {label for label, pattern in TOPIC_RULES if re.search(pattern, text, re.I)}
+        for hashtag in re.findall(r'#([A-Za-z0-9_\u0900-\u097f]+)', text):
+            normalized = hashtag.casefold().replace('_', '')
+            if normalized not in TOPIC_STOP_HASHTAGS and len(normalized) >= 3:
+                topics.add('#' + hashtag.replace('_', ' '))
+        if not topics:
+            topics = {'Other'}
+        label = (row.get('sentiment') or {}).get('label')
+        for topic in sorted(topics, key=str.casefold)[:6]:
+            topic_stats[topic]['count'] += 1
+            if label in sentiment_keys:
+                topic_stats[topic][f'{label}_count'] += 1
+    ranked_topics = sorted(
+        ((topic, values) for topic, values in topic_stats.items() if topic != 'Other'),
+        key=lambda item: (-item[1]['count'], item[0].casefold()),
+    )
+    top_topics = [{'topic': topic, **values} for topic, values in ranked_topics[:5]]
+    if 'Other' in topic_stats:
+        top_topics.append({'topic': 'Other', **topic_stats['Other']})
+
+    voice_stats = defaultdict(lambda: {
+        **{f'{label}_count': 0 for label in sentiment_keys},
+        'post_count': 0, 'engagement': 0, 'author': '', 'username': '', 'avatar_url': '',
+    })
+    voice_query = {
+        **POST_SCOPE, 'platform': 'x',
+        'published_at': {'$gte': start, '$lt': end},
+        'demo': config().seed_mock_data,
+    }
+    if project_clause:
+        voice_query = {'$and': [voice_query, project_clause]}
+    async for row in database.posts.find(
+            voice_query, {'author': 1, 'author_handle': 1, 'author_avatar_url': 1,
+                          'sentiment.label': 1, 'engagement_score': 1}):
+        author = str(row.get('author') or 'Unknown').strip()
+        username = str(row.get('author_handle') or '').strip().lstrip('@')
+        key = (username or author).casefold()
+        voice = voice_stats[key]
+        voice['author'], voice['username'] = author, username
+        avatar_url = str(row.get('author_avatar_url') or '')
+        if avatar_url.startswith(('https://', 'http://')):
+            voice['avatar_url'] = avatar_url
+        voice['post_count'] += 1
+        voice['engagement'] += int(row.get('engagement_score') or 0)
+        label = (row.get('sentiment') or {}).get('label')
+        if label in sentiment_keys:
+            voice[f'{label}_count'] += 1
+    top_voices = sorted(
+        voice_stats.values(), key=lambda voice: (-voice['post_count'], -voice['engagement'], voice['author'].casefold())
+    )[:5]
+    return top_topics, top_voices
 
 
 async def background_manual_sync(database, client):
@@ -132,6 +230,18 @@ async def lifespan(app):
         },
         '$unset': {'email': '', 'email_enabled': '', 'webhook_enabled': '', 'webhook_secret': ''},
     }, upsert=True)
+    watchlist_settings = await db.settings.find_one({'_id': 'main'}) or {}
+    if watchlist_settings.get('active_project') not in MONITORING_PROJECTS:
+        await db.settings.update_one({'_id': 'main'}, {
+            '$set': {'active_project': DEFAULT_MONITORING_PROJECT},
+        })
+    if watchlist_settings.get('x_watchlist_defaults_version') != 'bihar-voices-v1':
+        existing_usernames = watchlist_settings.get('x_usernames', [])
+        merged_usernames = list(dict.fromkeys([*DEFAULT_X_USERNAMES, *existing_usernames]))
+        await db.settings.update_one({'_id': 'main'}, {'$set': {
+            'x_usernames': merged_usernames,
+            'x_watchlist_defaults_version': 'bihar-voices-v1',
+        }})
     # Backfill the defaults for databases created before editable scheduling;
     # later startups preserve the administrator's saved values.
     await db.settings.update_one(
@@ -148,6 +258,15 @@ async def lifespan(app):
         cleaned_author = _author_name(stored.get('author'))
         if cleaned_author != stored.get('author'):
             await db.posts.update_one({'_id': stored['_id']}, {'$set': {'author': cleaned_author}})
+    # Existing YouTube rows can recover their preview from the stable video id
+    # without another quota-bearing API request.
+    await db.posts.update_many({
+        'platform': 'youtube',
+        '$or': [{'thumbnail_url': {'$exists': False}}, {'thumbnail_url': ''}],
+    }, [{'$set': {
+        'thumbnail_url': {'$concat': ['https://i.ytimg.com/vi/', '$external_id', '/hqdefault.jpg']},
+        'media_type': 'video',
+    }}])
     if c.youtube_api_key and not c.seed_mock_data and 'youtube' in c.enabled_platforms.split(','):
         # YOUTUBE_API_KEY is the source of truth. Using $setOnInsert here left a
         # stale encrypted key in MongoDB whenever an operator rotated the key in
@@ -354,6 +473,7 @@ async def overview(platform: Platform | None = None, day: date | None = None, us
                 selected_summary['negative_count'] / selected_summary['total_count'] * 100, 1
             ) if selected_summary['total_count'] else 0
     prefs = await settings(db())
+    active_project = prefs.get('active_project', DEFAULT_MONITORING_PROJECT)
     pending = await db().posts.count_documents({
         **POST_SCOPE, 'sentiment': None, 'platform': {'$in': selected},
         'demo': config().seed_mock_data,
@@ -369,6 +489,9 @@ async def overview(platform: Platform | None = None, day: date | None = None, us
             'platform': {'$in': selected},
         }, {'_id': 0}).to_list(None)
     selected_start, selected_end = bounds(selected_day)
+    top_topics, top_x_voices = await conversation_insights(
+        db(), selected_start, selected_end, selected, active_project,
+    )
     news_sentiments = {
         channel: {'positive_count': 0, 'negative_count': 0}
         for channel in NEWS_CHANNELS
@@ -423,6 +546,13 @@ async def overview(platform: Platform | None = None, day: date | None = None, us
             'historical_count': historical_counts[channel],
             'historical_top_ten': channel in top_channels,
         } for channel in ordered_channels],
+        top_topics=top_topics,
+        top_x_voices=top_x_voices,
+        active_project=active_project,
+        monitoring_projects=[
+            {'id': project_id, 'label': project['label'], 'keywords': project['keywords']}
+            for project_id, project in MONITORING_PROJECTS.items()
+        ],
         pending=pending, threshold=prefs['threshold'],
         sync_running=is_syncing,
         schedule=automation_schedule(),
@@ -432,20 +562,69 @@ async def overview(platform: Platform | None = None, day: date | None = None, us
 
 @app.get('/api/posts')
 async def posts(q: str = Query('', max_length=200), platform: Platform | None = None, sentiment: Label | None = None,
-                day: date | None = None, sort: Literal['recency', 'engagement'] = 'recency', page: int = Query(1, ge=1, le=10000), user=Depends(current_user)):
+                day: date | None = None, sort: Literal['recency', 'engagement'] = 'recency',
+                page: int = Query(1, ge=1, le=10000), page_size: int = Query(20, ge=1, le=50),
+                user=Depends(current_user)):
     import re
     included = analytics_platforms()
     query = {**POST_SCOPE, 'platform': platform if platform in included else {'$in': included if platform is None else []}, 'demo': config().seed_mock_data}
     if q:
         # Escaped substring supports Hindi and English consistently; text index remains available for analytical queries.
         query['content'] = {'$regex': re.escape(q), '$options': 'i'}
+    prefs = await settings(db())
+    project_clause = project_content_clause(
+        prefs.get('active_project', DEFAULT_MONITORING_PROJECT),
+    )
+    if project_clause:
+        query = {'$and': [query, project_clause]}
     if sentiment:
         query['sentiment.label'] = sentiment
     if day:
         start, end = bounds(day.isoformat()); query['published_at'] = {'$gte': start, '$lt': end}
-    rows = await db().posts.find(query).sort([('engagement_score' if sort == 'engagement' else 'published_at', -1), ('_id', -1)]).skip((page - 1) * 20).limit(20).to_list(20)
-    await audit(db(), user, 'view.posts', {'platform': platform, 'sentiment': sentiment, 'page': page})
-    return serialize({'items': rows, 'total': await db().posts.count_documents(query), 'page': page})
+    rows = await db().posts.find(query).sort([('engagement_score' if sort == 'engagement' else 'published_at', -1), ('_id', -1)]).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    await audit(db(), user, 'view.posts', {'platform': platform, 'sentiment': sentiment, 'page': page, 'page_size': page_size})
+    return serialize({'items': rows, 'total': await db().posts.count_documents(query), 'page': page, 'page_size': page_size})
+
+
+@app.get('/api/voices')
+async def voices(days: int = Query(7, ge=1, le=30), user=Depends(current_user)):
+    start = now() - timedelta(days=days)
+    handles = [value.casefold() for value in DEFAULT_X_USERNAMES]
+    stats = {
+        handle: {
+            'username': original, 'author': original, 'avatar_url': '',
+            'post_count': 0, 'reach': 0, 'engagement': 0,
+            'positive_count': 0, 'negative_count': 0,
+            'neutral_count': 0, 'mixed_count': 0,
+        }
+        for original, handle in zip(DEFAULT_X_USERNAMES, handles)
+    }
+    query = {
+        **POST_SCOPE, 'platform': 'x', 'demo': config().seed_mock_data,
+        'published_at': {'$gte': start}, 'author_handle': {'$in': handles},
+    }
+    async for row in db().posts.find(query, {
+        'author': 1, 'author_handle': 1, 'author_avatar_url': 1,
+        'engagement': 1, 'engagement_score': 1, 'sentiment.label': 1,
+    }):
+        handle = str(row.get('author_handle') or '').casefold()
+        voice = stats.get(handle)
+        if not voice:
+            continue
+        voice['author'] = str(row.get('author') or voice['author'])
+        avatar = str(row.get('author_avatar_url') or '')
+        if avatar.startswith(('https://', 'http://')):
+            voice['avatar_url'] = avatar
+        engagement = row.get('engagement') or {}
+        voice['post_count'] += 1
+        voice['reach'] += int(engagement.get('views') or 0)
+        voice['engagement'] += int(row.get('engagement_score') or 0)
+        label = (row.get('sentiment') or {}).get('label')
+        if label in {'positive', 'negative', 'neutral', 'mixed'}:
+            voice[f'{label}_count'] += 1
+    ordered = [stats[handle] for handle in handles]
+    await audit(db(), user, 'view.voices', {'days': days})
+    return serialize({'days': days, 'items': ordered, 'total': len(ordered)})
 
 @app.get('/api/settings')
 async def read_settings(user=Depends(current_user)):
@@ -455,12 +634,39 @@ async def read_settings(user=Depends(current_user)):
                       'sources': await statuses(db()), 'model': config().hf_model, 'classifier': classifier_status(),
                       'automation_start_hour': prefs.get('automation_start_hour', DEFAULT_AUTOMATION_START_HOUR),
                       'automation_end_hour': prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR),
+                      'x_usernames': prefs.get('x_usernames', []),
+                      'active_project': prefs.get('active_project', DEFAULT_MONITORING_PROJECT),
+                      'monitoring_projects': [
+                          {'id': project_id, 'label': project['label'], 'keywords': project['keywords']}
+                          for project_id, project in MONITORING_PROJECTS.items()
+                      ],
                       'timezone': config().reporting_timezone})
 
 class Preferences(BaseModel):
-    keywords: list[str] = Field(min_length=1, max_length=30)
+    keywords: list[str] = Field(min_length=1, max_length=50)
+    x_usernames: list[str] = Field(default_factory=list, max_length=50)
+    active_project: str = DEFAULT_MONITORING_PROJECT
     automation_start_hour: int = Field(ge=0, le=22)
     automation_end_hour: int = Field(ge=1, le=23)
+
+
+class ProjectSelection(BaseModel):
+    active_project: str
+
+
+@app.put('/api/project')
+async def select_project(value: ProjectSelection, user=Depends(admin)):
+    if value.active_project not in MONITORING_PROJECTS:
+        raise HTTPException(422, 'Unknown monitoring project')
+    await db().settings.update_one({'_id': 'main'}, {
+        '$set': {'active_project': value.active_project},
+    }, upsert=True)
+    await db().platform_credentials.update_many(
+        {'platform': {'$in': PLATFORMS}},
+        {'$set': {'status': 'pending', 'error': None}},
+    )
+    await audit(db(), user, 'project.select', {'active_project': value.active_project})
+    return {'saved': True, 'active_project': value.active_project}
 
 
 @app.put('/api/settings')
@@ -468,6 +674,13 @@ async def update_settings(value: Preferences, user=Depends(admin)):
     if any(not k.strip() or len(k) > 100 for k in value.keywords):
         raise HTTPException(422, 'Keywords must contain 1-100 characters')
     terms = list(dict.fromkeys(k.strip() for k in value.keywords))
+    x_usernames = list(dict.fromkeys(
+        username.strip().lstrip('@') for username in value.x_usernames if username.strip()
+    ))
+    if any(not re.fullmatch(r'[A-Za-z0-9_]{1,30}', username) for username in x_usernames):
+        raise HTTPException(422, 'X usernames may contain only letters, numbers and underscores')
+    if value.active_project not in MONITORING_PROJECTS:
+        raise HTTPException(422, 'Unknown monitoring project')
     if value.automation_start_hour >= value.automation_end_hour:
         raise HTTPException(422, 'Automation end time must be after start time')
     for term in terms:
@@ -476,6 +689,8 @@ async def update_settings(value: Preferences, user=Depends(admin)):
     await db().settings.update_one({'_id': 'main'}, {'$set': {
         'automation_start_hour': value.automation_start_hour,
         'automation_end_hour': value.automation_end_hour,
+        'x_usernames': x_usernames,
+        'active_project': value.active_project,
     }}, upsert=True)
     if config().scheduler_enabled:
         configure_automation_jobs(
@@ -485,6 +700,8 @@ async def update_settings(value: Preferences, user=Depends(admin)):
     await audit(db(), user, 'settings.update', {
         'automation_start_hour': value.automation_start_hour,
         'automation_end_hour': value.automation_end_hour,
+        'x_username_count': len(x_usernames),
+        'active_project': value.active_project,
     })
     return {'saved': True, 'automation_start_hour': value.automation_start_hour,
             'automation_end_hour': value.automation_end_hour}

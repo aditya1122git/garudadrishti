@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet
 from pymongo.errors import DuplicateKeyError
 from .config import config, DEFAULT_AUTOMATION_START_HOUR, DEFAULT_AUTOMATION_END_HOUR
 from .models import now
-from .connectors import apify_posts, google_news_posts, youtube_posts, request
+from .connectors import BIHAR_DISCOVERY_TERMS, apify_posts, google_news_posts, youtube_posts, request
 from .sentiment import classifier
 
 YOUTUBE_CONTENT_SCOPE = 'youtube-title-description-v3'
@@ -24,7 +24,158 @@ DEFAULT_KEYWORD_VARIANTS = [
     'Samrat Chaudhary', 'BJP Bihar', 'Bihar Bharatiya Janata Party',
     'Government of Bihar', '#SamratChoudhary', '#BJP4Bihar', '#BiharGovernment',
 ]
+DEFAULT_X_USERNAMES = [
+    'ANI', 'Live_Cities', 'aajtak', 'News18Bihar', 'PoliceBhagalpur',
+    'ANI_HindiNews', 'ians_india', 'IndianExpress', 'BIHARSS1', 'ZeeBiharNews',
+    'dmbhagalpur', 'moliticsindia', 'ChapraZila', 'Hinduspirit0', 'TV9Bharatvarsh',
+    'IANSKhabar', 'amitvikram', 'BiharInfraTales', 'INCBihar', 'SadanJee',
+    'PurneaTimes', 'BhagalpurIndex', 'Bharat24Liv', 'naugachiapolice', 'The_Banka_Index',
+]
+MONITORING_PROJECTS = {
+    'bhagalpur-division': {
+        'label': 'BHAGALPUR DIVISION (Headquarters: Bhagalpur)',
+        'keywords': [
+            'Bhagalpur Division', 'Bhagalpur', 'भागलपुर', 'भागलपुर प्रमंडल',
+            'Bhagalpur Commissioner', 'Bhagalpur DM', 'Bhagalpur Administration',
+            'Bhagalpur News', 'Bhagalpur Development', 'Bhagalpur Police',
+            'Banka', 'बांका', 'भागलपुर मंडल', 'Bhagalpur District',
+            'Bhagalpur Smart City', 'Bhagalpur Municipal Corporation',
+            'Bhagalpur Nagar Nigam', 'Bhagalpur Traffic', 'Bhagalpur Airport',
+            'Bhagalpur University', 'Tilka Manjhi Bhagalpur University',
+            'Bhagalpur Flood', 'Bhagalpur Crime', 'Bhagalpur Infrastructure',
+            'Banka District', 'Banka News', 'Banka Administration', 'Banka Police',
+            'भागलपुर जिला', 'भागलपुर प्रशासन', 'भागलपुर पुलिस', 'भागलपुर विकास',
+            'भागलपुर समाचार', 'बांका जिला', 'बांका प्रशासन', 'बांका पुलिस',
+            '#Bhagalpur', '#BhagalpurNews', '#Banka', '#भागलपुर',
+        ],
+    },
+    'bihar-cm-qrt': {
+        'label': 'Bihar CM QRT',
+        'keywords': [
+            'Bihar CM QRT', 'CM QRT Bihar', 'Bihar Chief Minister', 'Bihar CM Office',
+            'मुख्यमंत्री बिहार', 'मुख्यमंत्री कार्यालय', 'CM Helpline Bihar',
+            'Bihar CM Action', 'Bihar Government Action', 'CM Public Grievance',
+            'जन शिकायत बिहार', 'जनता दरबार', 'मुख्यमंत्री जनता दरबार',
+            'Bihar Emergency Response', 'CMO Bihar', 'Bihar CMO',
+            'Chief Minister Office Bihar', 'Bihar CM Helpline 181',
+            'Bihar CM Complaint', 'Bihar CM Grievance', 'Bihar CM Review Meeting',
+            'Bihar Cabinet Decision', 'Bihar Government Decision',
+            'Bihar Government Scheme', 'Bihar Public Grievance',
+            'मुख्यमंत्री सचिवालय बिहार', 'मुख्यमंत्री हेल्पलाइन बिहार',
+            'मुख्यमंत्री शिकायत बिहार', 'लोक शिकायत बिहार', 'बिहार कैबिनेट फैसला',
+            'बिहार सरकार कार्रवाई', '#BiharCM', '#CMOBihar', '#JantaDarbar',
+        ],
+    },
+    'district-munger': {
+        'label': 'District Munger',
+        'keywords': [
+            'Munger', 'मुंगेर', 'Munger News', 'Munger District',
+            'Munger Administration', 'Munger DM', 'Munger Police', 'Munger Development',
+            'Munger Crime', 'Munger Infrastructure', 'Munger Railway', 'Munger University',
+            'मुंगेर जिला', 'मुंगेर प्रशासन', 'मुंगेर पुलिस', 'Munger Division',
+            'Munger Commissioner', 'Munger Municipal Corporation',
+            'Munger Nagar Nigam', 'Munger Traffic', 'Munger Hospital',
+            'Munger Flood', 'Munger Education', 'Jamalpur Bihar',
+            'Jamalpur Railway', 'Haveli Kharagpur', 'Tarapur Munger',
+            'मुंगेर प्रमंडल', 'मुंगेर विकास', 'मुंगेर समाचार', 'मुंगेर अपराध',
+            'जमालपुर बिहार', 'हवेली खड़गपुर', 'तारापुर मुंगेर',
+            '#Munger', '#MungerNews', '#मुंगेर',
+        ],
+    },
+    'magadh-division': {
+        'label': 'MAGADH DIVISION (Headquarters: Gaya)',
+        'keywords': [
+            'Magadh Division', 'मगध प्रमंडल', 'Gaya', 'गया', 'Nawada', 'नवादा',
+            'Aurangabad Bihar', 'औरंगाबाद बिहार', 'Jehanabad', 'जहानाबाद',
+            'Arwal', 'अरवल', 'Magadh Commissioner', 'Gaya DM',
+            'Magadh Development', 'Magadh News', 'मगध विकास', 'Magadh Administration',
+            'Magadh Police', 'Magadh Infrastructure', 'Gaya District',
+            'Gaya Administration', 'Gaya Police', 'Gaya Development', 'Gaya News',
+            'Bodh Gaya', 'Nawada District', 'Nawada Administration', 'Nawada Police',
+            'Aurangabad Bihar District', 'Aurangabad Bihar Police',
+            'Jehanabad District', 'Jehanabad Police', 'Arwal District', 'Arwal Police',
+            'मगध प्रशासन', 'मगध समाचार', 'गया जिला', 'गया प्रशासन', 'गया पुलिस',
+            'बोधगया', 'नवादा प्रशासन', 'औरंगाबाद प्रशासन', 'जहानाबाद प्रशासन',
+            'अरवल प्रशासन', '#Magadh', '#Gaya', '#BodhGaya', '#मगध',
+        ],
+    },
+    'patna-division': {
+        'label': 'Patna Division (Headquarters: Patna)',
+        'keywords': [
+            'Patna Division', 'पटना प्रमंडल', 'Patna', 'पटना', 'Nalanda', 'नालंदा',
+            'Bhojpur', 'भोजपुर', 'Buxar', 'बक्सर', 'Rohtas', 'रोहतास',
+            'Kaimur', 'कैमूर', 'Patna Commissioner', 'Patna Administration',
+            'Patna DM', 'Patna Development', 'पटना प्रशासन', 'पटना विकास',
+            'Patna District', 'Patna Police', 'Patna Traffic Police',
+            'Patna Municipal Corporation', 'Patna Nagar Nigam', 'Patna Smart City',
+            'Patna Infrastructure', 'Patna Metro', 'Patna Airport', 'Patna News',
+            'Nalanda District', 'Nalanda Administration', 'Nalanda Police',
+            'Bhojpur District', 'Bhojpur Administration', 'Bhojpur Police',
+            'Buxar District', 'Buxar Administration', 'Buxar Police',
+            'Rohtas District', 'Rohtas Administration', 'Rohtas Police',
+            'Kaimur District', 'Kaimur Administration', 'Kaimur Police',
+            'पटना जिला', 'पटना पुलिस', 'पटना नगर निगम', 'पटना मेट्रो',
+            '#Patna', '#PatnaNews', '#PatnaPolice', '#पटना',
+        ],
+    },
+    'samrat-choudhary': {
+        'label': 'Samrat Choudhary Ji',
+        'keywords': [
+            'Samrat Choudhary', 'सम्राट चौधरी', 'Samrat Chaudhary',
+            'Samrat Choudhary Ji', 'सम्राट चौधरी जी', 'Samrat Choudhary News',
+            'Samrat Choudhary Speech', 'Samrat Choudhary Announcement',
+            'Samrat Choudhary Statement', 'Samrat Choudhary Rally',
+            'Samrat Choudhary Meeting', 'Samrat Choudhary Bihar',
+            'सम्राट चौधरी बयान', 'सम्राट चौधरी घोषणा', 'सम्राट चौधरी प्रेस कॉन्फ्रेंस',
+            'Samrat Choudhary Interview', 'Samrat Choudhary Press Conference',
+            'Samrat Choudhary Latest News', 'Samrat Choudhary BJP',
+            'Samrat Choudhary Deputy CM', 'Samrat Choudhary Bihar BJP',
+            'Samrat Chaudhary Bihar', 'Samrat Chaudhary News',
+            'Bihar Deputy CM Samrat Choudhary', 'Deputy CM Bihar Samrat Choudhary',
+            'Bihar Dy CM Samrat Choudhary', 'Deputy Chief Minister Samrat Choudhary',
+            'सम्राट चौधरी भाषण', 'सम्राट चौधरी रैली', 'सम्राट चौधरी बैठक',
+            'सम्राट चौधरी इंटरव्यू', 'उपमुख्यमंत्री सम्राट चौधरी',
+            'बिहार के उपमुख्यमंत्री सम्राट चौधरी', '@samratchoudhary',
+            '#SamratChoudhary', '#SamratChaudhary', '#सम्राटचौधरी',
+        ],
+    },
+    'tirhut-division': {
+        'label': 'TIRHUT DIVISION (Headquarters: Muzaffarpur)',
+        'keywords': [
+            'Tirhut Division', 'तिरहुत प्रमंडल', 'Muzaffarpur', 'मुजफ्फरपुर',
+            'Vaishali', 'वैशाली', 'Sitamarhi', 'सीतामढ़ी', 'Sheohar', 'शिवहर',
+            'East Champaran', 'पूर्वी चंपारण', 'Motihari', 'मोतिहारी',
+            'West Champaran', 'पश्चिमी चंपारण', 'Bettiah', 'बेतिया',
+            'Tirhut Commissioner', 'Tirhut Development', 'Tirhut News', 'तिरहुत विकास',
+            'Tirhut Administration', 'Tirhut Police', 'Tirhut Infrastructure',
+            'Muzaffarpur District', 'Muzaffarpur Administration',
+            'Muzaffarpur DM', 'Muzaffarpur Police', 'Muzaffarpur Development',
+            'Muzaffarpur News', 'Vaishali District', 'Vaishali Police',
+            'Hajipur Bihar', 'Sitamarhi District', 'Sitamarhi Police',
+            'Sheohar District', 'Sheohar Police', 'East Champaran District',
+            'Motihari Administration', 'Motihari Police', 'West Champaran District',
+            'Bettiah Administration', 'Bettiah Police', 'तिरहुत प्रशासन',
+            'तिरहुत समाचार', 'मुजफ्फरपुर जिला', 'मुजफ्फरपुर प्रशासन',
+            'मुजफ्फरपुर पुलिस', 'वैशाली प्रशासन', 'हाजीपुर बिहार',
+            'सीतामढ़ी प्रशासन', 'मोतिहारी प्रशासन', 'बेतिया प्रशासन',
+            '#Tirhut', '#Muzaffarpur', '#Motihari', '#Bettiah', '#तिरहुत',
+        ],
+    },
+}
+MONITORING_PROJECTS = {
+    'all': {
+        'label': 'All projects',
+        'keywords': list(dict.fromkeys(
+            keyword
+            for project in MONITORING_PROJECTS.values()
+            for keyword in project['keywords']
+        )),
+    },
+    **MONITORING_PROJECTS,
+}
+DEFAULT_MONITORING_PROJECT = 'bhagalpur-division'
 KEYWORDS = [
+    *BIHAR_DISCOVERY_TERMS,
     'Samrat Choudhary', 'Bihar BJP', 'Bharatiya Janata Party Bihar',
     'Bihar Government', 'Bihar Govt', 'सम्राट चौधरी', 'बिहार भाजपा', 'भाजपा बिहार',
     'बिहार सरकार', '#BiharBJP', '#SamratChaudhary', '#BiharGovt',
@@ -78,6 +229,8 @@ def decrypt(value):
 async def settings(db):
     return await db.settings.find_one({'_id': 'main'}) or {
         'threshold': 500,
+        'x_usernames': [],
+        'active_project': DEFAULT_MONITORING_PROJECT,
         'automation_start_hour': DEFAULT_AUTOMATION_START_HOUR,
         'automation_end_hour': DEFAULT_AUTOMATION_END_HOUR,
     }
@@ -260,12 +413,12 @@ def sync_running():
     return _sync_lock.locked()
 
 
-async def _social_posts(client, platform, secret, keywords, since):
+async def _social_posts(client, platform, secret, keywords, since, x_usernames=(), project_keywords=()):
     """Fetch public social posts through the configured Apify Actor."""
     apify_token = str(secret.get('api_key', '')).strip()
     if not apify_token:
         raise RuntimeError('Apify API token is not configured')
-    return await apify_posts(client, platform, secret, keywords, since)
+    return await apify_posts(client, platform, secret, keywords, since, x_usernames, project_keywords)
 
 async def scheduled_sync(db, client, platforms):
     """Run without any logged-in user, but only inside the operating window."""
@@ -284,7 +437,12 @@ async def sync(db, client, platforms=None):
         if not config().seed_mock_data:
             enabled = getattr(config(), 'enabled_platforms', ','.join(PLATFORMS)).split(',')
             selected = [p for p in (platforms or enabled) if p in enabled]
-            keywords = [k['keyword'] async for k in db.tracked_keywords.find({'is_active': True})]
+            preferences = await settings(db)
+            base_keywords = [k['keyword'] async for k in db.tracked_keywords.find({'is_active': True})]
+            active_project = preferences.get('active_project', DEFAULT_MONITORING_PROJECT)
+            project_keywords = MONITORING_PROJECTS.get(active_project, {}).get('keywords', [])
+            keywords = list(dict.fromkeys([*base_keywords, *project_keywords]))
+            x_usernames = preferences.get('x_usernames', [])
             if keywords:
                 async for c in db.platform_credentials.find({'platform': {'$in': selected}}):
                     p = c['platform']
@@ -292,7 +450,8 @@ async def sync(db, client, platforms=None):
                     await db.platform_credentials.update_one({'_id': c['_id']}, {'$set': {'last_attempt_at': started}})
                     try:
                         secret = decrypt(c['encrypted_api_key'])
-                        scope_changed = c.get('tracking_scope_version') != TRACKING_SCOPE_VERSION
+                        scope_changed = (c.get('tracking_scope_version') != TRACKING_SCOPE_VERSION
+                                         or c.get('monitoring_project') != active_project)
                         if scope_changed:
                             # A campaign retarget must not reuse the previous campaign's
                             # ingestion cursor. Backfill all sources for the new scope.
@@ -307,11 +466,13 @@ async def sync(db, client, platforms=None):
                             since = c.get('last_synced_at') or now() - timedelta(hours=24)
                         since -= timedelta(minutes=5)  # deliberate overlap; compound unique index deduplicates
                         if p == 'youtube':
-                            rows = await youtube_posts(client, secret, keywords, since)
+                            rows = await youtube_posts(client, secret, keywords, since, project_keywords)
                         elif p == 'news':
-                            rows = await google_news_posts(client, keywords, since)
+                            rows = await google_news_posts(client, keywords, since, project_keywords)
                         else:
-                            rows = await _social_posts(client, p, secret, keywords, since)
+                            rows = await _social_posts(
+                                client, p, secret, keywords, since, x_usernames, project_keywords,
+                            )
                         for row in rows:
                             if p == 'youtube':
                                 # Upgrade legacy title-only rows to title + description
@@ -322,9 +483,24 @@ async def sync(db, client, platforms=None):
                                         'classification_error': '', 'hf_candidate': '',
                                         'telegram_notification': '',
                                     }})
-                            await db.posts.update_one({'platform': p, 'external_id': row['external_id']}, {'$setOnInsert': row}, upsert=True)
+                            refresh_fields = {
+                                key: row[key] for key in (
+                                    'author_avatar_url', 'media_url', 'media_type', 'thumbnail_url',
+                                ) if row.get(key)
+                            }
+                            insert_fields = {
+                                key: value for key, value in row.items()
+                                if key not in refresh_fields
+                            }
+                            update = {'$setOnInsert': insert_fields}
+                            if refresh_fields:
+                                update['$set'] = refresh_fields
+                            await db.posts.update_one(
+                                {'platform': p, 'external_id': row['external_id']}, update, upsert=True,
+                            )
                         credential_update = {'last_synced_at': started, 'status': 'live', 'error': None,
                                              'tracking_scope_version': TRACKING_SCOPE_VERSION,
+                                             'monitoring_project': active_project,
                                              'encrypted_api_key': encrypt(secret)}
                         if p == 'youtube':
                             credential_update['search_strategy'] = YOUTUBE_SEARCH_STRATEGY
