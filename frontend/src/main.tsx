@@ -517,7 +517,7 @@ function Workspace({
   };
   const changeProject = async (projectId: string) => {
     if (session.role !== "admin" || projectId === data?.active_project) return;
-    const finishLoading = beginLoading("Switching monitoring projectâ€¦");
+    const finishLoading = beginLoading("Switching dashboard project…");
     setError("");
     try {
       await json("/project", {
@@ -536,13 +536,26 @@ function Workspace({
     }
   };
   const navigation = [
-    ["overview", "Overview", LayoutDashboard],
-    ["analytics", "Analytics", Activity],
-    ["feed", "Conversation", Radio],
+    ["overview", "Live Feed", Radio],
+    ["analytics", "Insights", Activity],
+    ["compare", "Compare", LayoutDashboard],
     ["voices", "Voices", Star],
-    ["alerts", "Alerts", Bell],
+    ["alerts", "Tickets", Bell],
+    ["team", "Team", Star],
+    ["reports", "Reports", Download],
+    ["activity-log", "Activity Log", Activity],
+    ["radar", "Radar", Eye],
+    ["knowledge", "Knowledge", LayoutDashboard],
     ["settings", "Settings", Settings],
   ] as const;
+  const referenceSections: Record<string, { title: string; description: string }> = {
+    compare: { title: "Compare", description: "Compare projects, sources and sentiment periods." },
+    team: { title: "Team", description: "Manage workspace members and review access." },
+    reports: { title: "Reports", description: "Create and download saved intelligence reports." },
+    "activity-log": { title: "Activity Log", description: "Review scraping, classification and alert activity." },
+    radar: { title: "Radar", description: "Track emerging signals and unusual conversation changes." },
+    knowledge: { title: "Knowledge", description: "Keep monitored entities, terms and source context together." },
+  };
   return (
     <GlobalLoadingContext.Provider value={beginLoading}>
     <div className="shell">
@@ -579,7 +592,7 @@ function Workspace({
           <select value={data?.active_project || ""}
             disabled={session.role !== "admin" || !data}
             onChange={(event) => changeProject(event.target.value)}
-            aria-label="Select monitoring project">
+            aria-label="Select dashboard project filter">
             {(data?.monitoring_projects || []).map((project) => (
               <option key={project.id} value={project.id}>{project.label}</option>
             ))}
@@ -630,9 +643,9 @@ function Workspace({
               <p className="eyebrow">CM SOCIAL INTELLIGENCE</p>
               <h1>
                 {view === "overview"
-                  ? "Live overview"
+                  ? "Live Feed"
                   : view === "analytics"
-                    ? "Analytics"
+                    ? "Insights"
                   : view === "voices"
                     ? "Voices"
                   : view === "feed"
@@ -641,11 +654,11 @@ function Workspace({
                       ? "Alert centre"
                       : view === "profile"
                         ? session.role === "admin" ? "Administrator profile" : "User profile"
-                        : "Workspace settings"}
+                        : referenceSections[view]?.title || "Workspace settings"}
               </h1>
               <p>
                 {view === "overview"
-                  ? "The conversation at a glance. Every signal in context."
+                  ? (data?.monitoring_projects || []).find((project) => project.id === data?.active_project)?.label || "All monitored conversations"
                   : view === "analytics"
                     ? "Sentiment trends, distribution and source intelligence."
                   : view === "voices"
@@ -656,7 +669,7 @@ function Workspace({
                       ? "Daily negative posts and the rolling seven-day trend."
                       : view === "profile"
                         ? "Update your account details and password."
-                        : "Manage the terms and sources you monitor."}
+                        : referenceSections[view]?.description || "Manage the terms and sources you monitor."}
               </p>
             </div>
             {(view === "overview" || view === "analytics" || view === "feed") && <div className="heading-actions">
@@ -710,6 +723,8 @@ function Workspace({
                   />
                 ) : view === "voices" ? (
                   <VoicesPage revision={revision} />
+                ) : referenceSections[view] ? (
+                  <ReferenceSection title={referenceSections[view].title} description={referenceSections[view].description} />
                 ) : (
                   <>
                     {active && (
@@ -1119,11 +1134,7 @@ function Workspace({
                           </>
                         )}
                         {view === "overview" && (
-                          <SummaryStats
-                            summary={summary}
-                            displayedDay={displayedDay}
-                            compact
-                          />
+                          <LiveFeedSummary summary={summary} />
                         )}
                         {(view === "overview" || view === "feed") && <div className={view === "overview" ? "conversation-monitor-grid" : undefined}>
                           <Feed
@@ -1134,11 +1145,16 @@ function Workspace({
                             onDayChange={(day) => setSelectedDay(day === data.date ? "" : day)}
                             compact={view === "overview"}
                             onExpand={() => setView("feed")}
+                            highlightKeywords={(data.monitoring_projects || []).find(
+                              (project) => project.id === data.active_project,
+                            )?.keywords || []}
                           />
                           {view === "overview" && (
                             <ConversationInsights
                               topics={data.top_topics || []}
                               voices={data.top_x_voices || []}
+                              project={(data.monitoring_projects || []).find((item) => item.id === data.active_project) || null}
+                              sources={data.sources}
                             />
                           )}
                         </div>}
@@ -1236,68 +1252,47 @@ function Stat({
   );
 }
 
-function SummaryStats({
-  summary,
-  displayedDay,
-  compact = false,
-}: {
-  summary: Rollup | null | undefined;
-  displayedDay: string;
-  compact?: boolean;
-}) {
+function LiveFeedSummary({ summary }: { summary: Rollup | null | undefined }) {
   const total = summary?.total_count || 0;
-  const percentage = (value: number) =>
-    total ? `${((value / total) * 100).toFixed(1)}%` : "0.0%";
+  const percentage = (value: number) => total ? Math.round(value / total * 100) : 0;
+  const metrics = [
+    { label: "Positive", value: summary?.positive_count || 0, tone: "positive" },
+    { label: "Negative", value: summary?.negative_count || 0, tone: "negative" },
+    { label: "Neutral", value: summary?.neutral_count || 0, tone: "neutral" },
+  ];
 
   return (
-    <div className={`stats${compact ? " compact-stats" : ""}`}>
-      <Stat
-        label="TOTAL CLASSIFIED"
-        value={summary ? num(summary.total_count) : "—"}
-        note={
-          summary
-            ? `Across enabled sources · ${dateLabel(displayedDay)}`
-            : "No classified data available"
-        }
-        tone="total"
-        icon={<Activity size={18} />}
-      />
-      <Stat
-        label="POSITIVE"
-        value={summary ? num(summary.positive_count) : "—"}
-        note={summary ? `${percentage(summary.positive_count)} of classified conversation` : "Awaiting data"}
-        tone="positive"
-      />
-      <Stat
-        label="NEGATIVE"
-        value={summary ? num(summary.negative_count) : "—"}
-        note={summary ? `${percentage(summary.negative_count)} of classified conversation` : "Awaiting data"}
-        tone="negative"
-      />
-      <Stat
-        label="MIXED"
-        value={summary ? num(summary.mixed_count || 0) : "—"}
-        note={summary ? `${percentage(summary.mixed_count || 0)} with both positive and negative stance` : "Awaiting data"}
-        tone="mixed"
-      />
-      <Stat
-        label="NEGATIVITY INDEX"
-        value={summary ? `${summary.negativity_index.toFixed(1)}%` : "—"}
-        note="Negative ÷ classified posts"
-        tone="index"
-        icon={<Eye size={18} />}
-      />
-    </div>
+    <section className="live-feed-summary" aria-label="Live feed sentiment summary">
+      <div className="live-feed-result">
+        <span>Results</span>
+        <strong>{num(total)}</strong>
+      </div>
+      {metrics.map((metric) => (
+        <div className={`live-feed-metric ${metric.tone}`} key={metric.label}>
+          <i />
+          <span>{metric.label}</span>
+          <strong>{num(metric.value)}</strong>
+          <small>{percentage(metric.value)}%</small>
+        </div>
+      ))}
+    </section>
   );
 }
 
 function ConversationInsights({
   topics,
   voices,
+  project,
+  sources,
 }: {
   topics: NonNullable<Overview["top_topics"]>;
   voices: NonNullable<Overview["top_x_voices"]>;
+  project: { id: string; label: string; keywords: string[] } | null;
+  sources: Source[];
 }) {
+  const lastSync = sources
+    .map((source) => source.last_synced_at ? new Date(source.last_synced_at).getTime() : 0)
+    .reduce((latest, value) => Math.max(latest, value), 0);
   return (
     <aside className="conversation-insights" aria-label="Conversation insights">
       <section className="panel insight-card topics-card">
@@ -1364,7 +1359,40 @@ function ConversationInsights({
           }) : <div className="insight-empty">No X voices for this date.</div>}
         </div>
       </section>
+
+      <section className="panel insight-card project-controls-card">
+        <div className="panel-title">
+          <h2>Project Controls</h2>
+          <span className="project-active-badge"><i /> Active</span>
+        </div>
+        <div className="project-controls-body">
+          <strong>{project?.label || "All projects"}</strong>
+          <small>{lastSync ? `Last refresh ${new Date(lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Waiting for first source refresh"}</small>
+          <div className="project-control-row">
+            <span>Monitored sources</span>
+            <b>{sources.filter((source) => source.status !== "disconnected").length} / {sources.length}</b>
+          </div>
+          <div className="project-keyword-heading">
+            <span>Keywords</span>
+            <b>{project?.keywords.length || 0}</b>
+          </div>
+          <div className="project-keyword-list" aria-label="Active project keywords">
+            {(project?.keywords || []).map((keyword) => <span key={keyword}>{keyword}</span>)}
+          </div>
+        </div>
+      </section>
     </aside>
+  );
+}
+
+function ReferenceSection({ title, description }: { title: string; description: string }) {
+  return (
+    <section className="panel reference-section">
+      <span className="reference-section-icon"><Eye size={24} /></span>
+      <h2>{title}</h2>
+      <p>{description}</p>
+      <small>This section will be matched to the page screenshot you provide next.</small>
+    </section>
   );
 }
 
@@ -1835,6 +1863,7 @@ function Feed({
   onDayChange,
   compact,
   onExpand,
+  highlightKeywords,
 }: {
   platform: string;
   revision: number;
@@ -1843,6 +1872,7 @@ function Feed({
   onDayChange: (day: string) => void;
   compact: boolean;
   onExpand: () => void;
+  highlightKeywords: string[];
 }) {
   const beginLoading = React.useContext(GlobalLoadingContext);
   const [q, setQ] = useState(""),
@@ -1856,7 +1886,7 @@ function Feed({
   const [expandedPosts, setExpandedPosts] = useState<Set<string>>(
     () => new Set(),
   );
-  const pageSize = compact ? 4 : 20;
+  const pageSize = compact ? 10 : 20;
   useEffect(() => {
     const t = setTimeout(() => setTerm(q), 300);
     return () => clearTimeout(t);
@@ -1896,7 +1926,7 @@ function Feed({
     <section className="panel feed">
       <div className="panel-title">
         <div>
-          <h2>{compact ? "Conversation watch" : "Recent posts"}</h2>
+          <h2>{compact ? "Mentions" : "Recent posts"}</h2>
           <p>
             {loading
               ? "Loading conversations…"
@@ -1993,7 +2023,7 @@ function Feed({
                         : undefined
                   }
                 >
-                  {p.content}
+                  <HighlightedText text={p.content} keywords={highlightKeywords} />
                 </p>
                 {(contentExpandable ||
                   (p.url && /^https:\/\//.test(p.url))) && (
@@ -2084,6 +2114,28 @@ function Feed({
       )}
     </section>
   );
+}
+
+function HighlightedText({ text, keywords }: { text: string; keywords: string[] }) {
+  const terms = React.useMemo(() => {
+    const unique = new Map<string, string>();
+    keywords.forEach((keyword) => {
+      String(keyword).split(/\s+AND\s+/i).forEach((part) => {
+        const clean = part.trim();
+        if (clean.length >= 2) unique.set(clean.toLocaleLowerCase("en-IN"), clean);
+      });
+    });
+    return Array.from(unique.values()).sort((a, b) => b.length - a.length);
+  }, [keywords]);
+  if (!terms.length) return <>{text}</>;
+  const escaped = terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const matcher = new RegExp(`(${escaped.join("|")})`, "giu");
+  const exact = new Set(terms.map((term) => term.toLocaleLowerCase("en-IN")));
+  return <>{text.split(matcher).map((part, index) =>
+    exact.has(part.toLocaleLowerCase("en-IN"))
+      ? <mark className="keyword-highlight" key={`${index}-${part}`}>{part}</mark>
+      : <React.Fragment key={`${index}-${part}`}>{part}</React.Fragment>,
+  )}</>;
 }
 
 function Modal({
@@ -2426,10 +2478,13 @@ function SettingsPanel({
   const [prefs, setPrefs] = useState<any>(null),
     [terms, setTerms] = useState(""),
     [xUsernames, setXUsernames] = useState(""),
-    [activeProject, setActiveProject] = useState(""),
     [startHour, setStartHour] = useState(6),
+    [startMinute, setStartMinute] = useState(0),
     [endHour, setEndHour] = useState(22),
+    [endMinute, setEndMinute] = useState(0),
     [editing, setEditing] = useState(false),
+    [confirmScrape, setConfirmScrape] = useState(false),
+    [manualScraping, setManualScraping] = useState(false),
     [message, setMessage] = useState(""),
     [error, setError] = useState(""),
     [saving, setSaving] = useState(false);
@@ -2439,9 +2494,10 @@ function SettingsPanel({
       .then((p) => {
         setPrefs(p);
         setStartHour(p.automation_start_hour ?? 6);
+        setStartMinute(p.automation_start_minute ?? 0);
         setEndHour(p.automation_end_hour ?? 22);
+        setEndMinute(p.automation_end_minute ?? 0);
         setXUsernames((p.x_usernames || []).join("\n"));
-        setActiveProject(p.active_project || p.monitoring_projects?.[0]?.id || "");
         setTerms(
           p.keywords
             .filter((k: any) => k.is_active)
@@ -2471,7 +2527,7 @@ function SettingsPanel({
     const normalizedUsernames = Array.from(new Set(
       xUsernames
         .split(/\r?\n/)
-        .map((value) => value.trim())
+        .map((value) => value.trim().replace(/^@/, ""))
         .filter(Boolean),
     ));
     if (!normalizedTerms.length) {
@@ -2486,18 +2542,21 @@ function SettingsPanel({
         body: JSON.stringify({
           keywords: normalizedTerms,
           x_usernames: normalizedUsernames,
-          active_project: activeProject,
+          active_project: prefs.active_project,
           automation_start_hour: startHour,
+          automation_start_minute: startMinute,
           automation_end_hour: endHour,
+          automation_end_minute: endMinute,
         }),
       });
       setPrefs({
         ...prefs,
         automation_start_hour: startHour,
+        automation_start_minute: startMinute,
         automation_end_hour: endHour,
+        automation_end_minute: endMinute,
         keywords: normalizedTerms.map((keyword) => ({ keyword, is_active: true })),
         x_usernames: normalizedUsernames,
-        active_project: activeProject,
       });
       setTerms(normalizedTerms.join("\n"));
       setXUsernames(normalizedUsernames.join("\n"));
@@ -2511,9 +2570,55 @@ function SettingsPanel({
       finishLoading();
     }
   }
-  const selectedProject = (prefs.monitoring_projects || []).find(
-    (project: any) => project.id === activeProject,
+  const allProjects = (prefs.monitoring_projects || []).find(
+    (project: any) => project.id === "all",
   );
+  const manualKeywordValues = terms.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const combinedKeywordValues = Array.from(new Map(
+    [...(allProjects?.keywords || []), ...manualKeywordValues]
+      .map((value: string) => [value.toLocaleLowerCase("en-IN"), value]),
+  ).values());
+  const accountValues = Array.from(new Set(
+    xUsernames.split(/\r?\n/)
+      .map((value) => value.trim().replace(/^@/, ""))
+      .filter(Boolean),
+  ));
+  const accountProfiles = new Map<string, { author?: string; avatar_url?: string }>(
+    (prefs.x_accounts || []).map((account: any) => [
+      String(account.username || "").replace(/^@/, "").toLowerCase(),
+      account,
+    ]),
+  );
+  const timeValue = (hour: number, minute: number) =>
+    `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  const setTime = (value: string, setHour: (hour: number) => void,
+    setMinuteValue: (minute: number) => void) => {
+    const [hour, minute] = value.split(":").map(Number);
+    if (Number.isInteger(hour) && Number.isInteger(minute)) {
+      setHour(hour);
+      setMinuteValue(minute);
+    }
+  };
+  async function runManualScrape() {
+    const finishLoading = beginLoading("Starting manual scrape…");
+    setManualScraping(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await json("/sync", { method: "POST" });
+      setConfirmScrape(false);
+      setMessage(result.started
+        ? "Manual scrape started in the background. New posts will appear after ingestion and classification."
+        : "A scrape is already running. No duplicate run was started.");
+      onSaved();
+    } catch (reason) {
+      setError((reason as Error).message);
+      setConfirmScrape(false);
+    } finally {
+      setManualScraping(false);
+      finishLoading();
+    }
+  }
   return (
     <>
       <form onSubmit={save} className="settings-grid" autoComplete="off">
@@ -2524,66 +2629,90 @@ function SettingsPanel({
               onClick={() => { setEditing(true); setMessage(""); setError(""); }}>Edit settings</button>}
           </div>
 
-          <div className="monitoring-project-editor">
-            <label>
-              Monitoring project
-              <select className="form-select" value={activeProject}
-                disabled={!admin || !editing}
-                onChange={(e) => setActiveProject(e.target.value)}>
-                {(prefs.monitoring_projects || []).map((project: any) => (
-                  <option key={project.id} value={project.id}>{project.label}</option>
-                ))}
-              </select>
-              <small>The selected project&apos;s additional keywords are combined with the existing keywords below for every source.</small>
-            </label>
-            {selectedProject && (
-              <div className="project-keyword-preview">
-                <strong>{selectedProject.keywords.length} additional keywords</strong>
-                <p>{selectedProject.keywords.join(" · ")}</p>
-              </div>
+          <section className="keyword-scope-panel">
+            <div className="settings-subheading">
+              <div><strong>Keywords and hashtags</strong><small>All project keywords + manual monitoring terms</small></div>
+              <span>{combinedKeywordValues.length} active</span>
+            </div>
+            <div className="keyword-chip-cloud">
+              {combinedKeywordValues.map((keyword: string) => (
+                <span className="keyword-chip" key={keyword.toLocaleLowerCase("en-IN")}>
+                  {keyword}
+                </span>
+              ))}
+            </div>
+            {admin && editing && (
+              <label className="manual-keyword-editor">
+                Manual keywords — one per line
+                <textarea className="form-control" rows={7} value={terms}
+                  onChange={(e) => setTerms(e.target.value)} />
+                <small>Project keywords are included automatically and do not need to be copied here.</small>
+              </label>
             )}
-          </div>
+          </section>
 
-          <label>
-            Keywords and hashtags
-            <textarea className="form-control"
-              rows={9}
-              value={terms}
-              onChange={(e) => setTerms(e.target.value)}
-              disabled={!admin || !editing}
-            />
-          </label>
-          <label>
-            X / Twitter accounts to monitor
-            <textarea className="form-control x-account-input"
-              rows={4}
-              placeholder={"samrat4bjp\nBJP4Bihar\nusername"}
-              value={xUsernames}
-              onChange={(e) => setXUsernames(e.target.value)}
-              disabled={!admin || !editing}
-            />
-            <small>One username per line. The account’s own posts are fetched even when they do not contain a tracked keyword.</small>
-          </label>
+          <section className="x-account-panel">
+            <div className="settings-subheading">
+              <div><strong>X / Twitter accounts</strong><small>Posts from these accounts are monitored directly</small></div>
+              <span>{accountValues.length} accounts</span>
+            </div>
+            <div className="x-account-chips">
+              {accountValues.map((username) => (
+                <span className="x-account-chip" key={username.toLowerCase()}>
+                  <i>
+                    <PlatformIcon platform="x" />
+                    <img src={accountProfiles.get(username.toLowerCase())?.avatar_url ||
+                      `https://unavatar.io/twitter/${encodeURIComponent(username)}`}
+                      alt="" loading="lazy" referrerPolicy="no-referrer"
+                      onError={(event) => { event.currentTarget.style.display = "none"; }} />
+                  </i>
+                  <span>@{username}</span>
+                </span>
+              ))}
+              {!accountValues.length && <span className="muted">No X accounts configured</span>}
+            </div>
+            {admin && editing && (
+              <label className="x-account-edit">
+                Add or remove accounts — one per line
+                <textarea className="form-control x-account-input" rows={4}
+                  placeholder={"@samrat4bjp\n@BJP4Bihar\n@username"}
+                  value={xUsernames} onChange={(e) => setXUsernames(e.target.value)} />
+                <small>You can enter usernames with or without @.</small>
+              </label>
+            )}
+          </section>
           <div className="schedule-editor">
             <div>
               <strong>Active automation window</strong>
-              <p>YouTube and Google News run every 15 minutes. Other social sources run every 3 hours.</p>
             </div>
             <label>
               Start time
-              <select className="form-select" value={startHour}
-                disabled={!admin || !editing} onChange={(e) => setStartHour(Number(e.target.value))}>
-                {Array.from({ length: 23 }, (_, hour) => <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>)}
-              </select>
+              <input className="form-control" type="time" step={60}
+                value={timeValue(startHour, startMinute)} disabled={!admin || !editing}
+                onChange={(e) => setTime(e.target.value, setStartHour, setStartMinute)} />
             </label>
             <label>
               End time
-              <select className="form-select" value={endHour}
-                disabled={!admin || !editing} onChange={(e) => setEndHour(Number(e.target.value))}>
-                {Array.from({ length: 23 }, (_, index) => index + 1).map((hour) => <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>)}
-              </select>
+              <input className="form-control" type="time" step={60}
+                value={timeValue(endHour, endMinute)} disabled={!admin || !editing}
+                onChange={(e) => setTime(e.target.value, setEndHour, setEndMinute)} />
             </label>
             <small>Timezone: {prefs.timezone || "Asia/Kolkata"}</small>
+          </div>
+          <div className="manual-scrape-panel">
+            <div className="manual-scrape-icon"><Activity size={19} /></div>
+            <div>
+              <strong>Manual data scrape</strong>
+              <p>Run all enabled sources now using every project and manual keyword.</p>
+              {editing && <small>Save or cancel the current settings edits before starting a scrape.</small>}
+            </div>
+            {admin && (
+              <button type="button" className="btn btn-outline-primary"
+                disabled={editing || manualScraping}
+                onClick={() => setConfirmScrape(true)}>
+                {manualScraping ? "Starting…" : "Run manual scrape"}
+              </button>
+            )}
           </div>
         </section>
         <div className="settings-save">
@@ -2602,13 +2731,15 @@ function SettingsPanel({
             <button type="button" className="btn btn-light" disabled={saving} onClick={() => {
               setTerms(prefs.keywords.filter((k: any) => k.is_active).map((k: any) => k.keyword).join("\n"));
               setXUsernames((prefs.x_usernames || []).join("\n"));
-              setActiveProject(prefs.active_project || prefs.monitoring_projects?.[0]?.id || "");
               setStartHour(prefs.automation_start_hour ?? 6);
+              setStartMinute(prefs.automation_start_minute ?? 0);
               setEndHour(prefs.automation_end_hour ?? 22);
+              setEndMinute(prefs.automation_end_minute ?? 0);
               setEditing(false);
               setError("");
             }}>Cancel</button>
-            <button className="btn btn-primary primary" disabled={saving || startHour >= endHour}>
+            <button className="btn btn-primary primary" disabled={saving ||
+              startHour * 60 + startMinute >= endHour * 60 + endMinute}>
               {saving ? "Saving…" : "Save settings"}
             </button>
           </>) : !admin ? (
@@ -2616,6 +2747,28 @@ function SettingsPanel({
           ) : null}
         </div>
       </form>
+      {confirmScrape && (
+        <Modal title="Confirm manual scrape" close={() => !manualScraping && setConfirmScrape(false)}>
+          <div className="manual-sync-warning">
+            <TriangleAlert size={24} />
+            <div>
+              <strong>This run can consume provider quota and paid credits</strong>
+              <p>Facebook, Instagram, X and Reddit may use Apify credits. YouTube search consumes Data API quota. All seven projects, manual keywords and configured X accounts will be queried.</p>
+            </div>
+          </div>
+          <ul className="manual-sync-notes">
+            <li>Duplicate posts are removed in the database, but provider requests may still be billable.</li>
+            <li>The scrape continues in the background and classification can take additional time.</li>
+            <li>If another scrape is already running, a second run will not be started.</li>
+          </ul>
+          <div className="manual-sync-actions">
+            <button type="button" className="btn btn-light" disabled={manualScraping}
+              onClick={() => setConfirmScrape(false)}>Cancel</button>
+            <button type="button" className="btn btn-primary primary" disabled={manualScraping}
+              onClick={runManualScrape}>{manualScraping ? "Starting…" : "Confirm and run"}</button>
+          </div>
+        </Modal>
+      )}
     </>
   );
 }

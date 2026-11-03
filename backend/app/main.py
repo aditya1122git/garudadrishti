@@ -6,10 +6,12 @@ import re
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import timedelta, date
+from zoneinfo import ZoneInfo
 import bcrypt
 import httpx
 import jwt
 from bson import ObjectId
+from pymongo import UpdateOne
 from pymongo.errors import DuplicateKeyError
 from beanie import init_beanie
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -21,7 +23,8 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from typing import Literal
 from .config import (config, APIFY_SYNC_INTERVAL_HOURS, DEFAULT_AUTOMATION_START_HOUR,
-                     DEFAULT_AUTOMATION_END_HOUR)
+                     DEFAULT_AUTOMATION_END_HOUR, DEFAULT_AUTOMATION_START_MINUTE,
+                     DEFAULT_AUTOMATION_END_MINUTE)
 from .connectors import _author_name, NEWS_CHANNELS, canonical_news_source
 from .sentiment import classifier_status
 from .models import DOCUMENTS, now, Platform, Label
@@ -29,7 +32,7 @@ from .services import (POST_SCOPE, KEYWORDS, DEFAULT_KEYWORD_VARIANTS, DEFAULT_X
                        MONITORING_PROJECTS, DEFAULT_MONITORING_PROJECT, PLATFORMS,
                        TRACKING_SCOPE_VERSION, YOUTUBE_CONTENT_SCOPE,
                        YOUTUBE_SEARCH_STRATEGY, analytics_platforms, today, bounds, settings, encrypt,
-                       audit, statuses, seed, sync, scheduled_sync, sync_running)
+                       reporting_day, reporting_days, audit, statuses, seed, sync, scheduled_sync, sync_running)
 from .reporting import build_sentiment_pdf
 
 logger = logging.getLogger(__name__)
@@ -58,7 +61,53 @@ def project_content_clause(project_id):
     keywords = MONITORING_PROJECTS.get(project_id, {}).get('keywords', [])
     if not keywords:
         return None
-    return {'content': {'$regex': '|'.join(re.escape(term) for term in keywords), '$options': 'i'}}
+    # Generated project queries contain Boolean discovery syntax such as
+    # "Patna AND Police" which never appears literally in a post. Project
+    # display filtering is entity/location based, so retain the left entity.
+    terms = {}
+    for keyword in keywords:
+        entity = re.split(r'\s+AND\s+', str(keyword), maxsplit=1, flags=re.I)[0].strip()
+        if entity:
+            terms.setdefault(entity.casefold(), entity)
+    pattern = '|'.join(re.escape(term) for term in sorted(terms.values(), key=len, reverse=True))
+    return {'content': {'$regex': pattern, '$options': 'i'}} if pattern else None
+
+
+async def project_rollup_rows(database, start_day, end_day, selected_platforms, project_id):
+    """Calculate project-filtered daily sentiment from stored classified posts."""
+    query = {
+        **POST_SCOPE,
+        'published_day': {'$in': reporting_days(start_day, end_day)},
+        'platform': {'$in': selected_platforms},
+        'demo': config().seed_mock_data,
+        'sentiment.label': {'$in': ['positive', 'negative', 'neutral', 'mixed']},
+    }
+    project_clause = project_content_clause(project_id)
+    if project_clause:
+        query = {'$and': [query, project_clause]}
+    grouped = defaultdict(lambda: dict(
+        positive_count=0, negative_count=0, neutral_count=0,
+        mixed_count=0, total_count=0,
+    ))
+    timezone = ZoneInfo(config().reporting_timezone)
+    async for row in database.posts.find(query, {
+        'published_at': 1, 'published_day': 1, 'platform': 1, 'sentiment.label': 1,
+    }):
+        published = row.get('published_at')
+        label = (row.get('sentiment') or {}).get('label')
+        platform = row.get('platform')
+        if not published or label not in {'positive', 'negative', 'neutral', 'mixed'} or not platform:
+            continue
+        local_day = row.get('published_day') or published.astimezone(timezone).date().isoformat()
+        values = grouped[(local_day, platform)]
+        values[f'{label}_count'] += 1
+        values['total_count'] += 1
+    return [
+        dict(date=day_value, platform=platform, **values,
+             negativity_index=round(values['negative_count'] / values['total_count'] * 100, 1)
+             if values['total_count'] else 0)
+        for (day_value, platform), values in grouped.items()
+    ]
 
 
 async def conversation_insights(database, start, end, selected_platforms, project_id):
@@ -67,7 +116,7 @@ async def conversation_insights(database, start, end, selected_platforms, projec
     topic_stats = defaultdict(lambda: {**{f'{label}_count': 0 for label in sentiment_keys}, 'count': 0})
     topic_query = {
         **POST_SCOPE,
-        'published_at': {'$gte': start, '$lt': end},
+        'published_day': reporting_day(start),
         'platform': {'$in': selected_platforms},
         'demo': config().seed_mock_data,
         'sentiment.label': {'$in': list(sentiment_keys)},
@@ -140,31 +189,58 @@ async def background_manual_sync(database, client):
         logger.exception('Manual background sync failed')
 
 
-def configure_automation_jobs(scheduler, database, client, start_hour: int, end_hour: int):
+def configure_automation_jobs(scheduler, database, client, start_hour: int, end_hour: int,
+                              start_minute: int = 0, end_minute: int = 0):
     """Replace automation jobs using the administrator's active-hour window."""
     job_ids = ('all-sources-4h', 'all-sources-3h',
-               'youtube-news-quarter-hour', 'youtube-news-full-hour')
+               'youtube-news-quarter-hour', 'youtube-news-full-hour',
+               'youtube-news-window', 'youtube-news-window-start',
+               'youtube-news-window-middle', 'youtube-news-window-end')
     for job_id in job_ids:
         if scheduler.get_job(job_id):
             scheduler.remove_job(job_id)
-    social_hours = list(range(start_hour, end_hour + 1, APIFY_SYNC_INTERVAL_HOURS))
-    frequent_full_hours = [hour for hour in range(start_hour + 1, end_hour + 1)
-                           if hour not in social_hours]
+    start_total = start_hour * 60 + start_minute
+    end_total = end_hour * 60 + end_minute
+    social_totals = list(range(start_total, end_total + 1, APIFY_SYNC_INTERVAL_HOURS * 60))
+    social_hours = [value // 60 for value in social_totals]
     common = dict(max_instances=1, coalesce=True, misfire_grace_time=300)
-    # At each three-hour boundary one combined run avoids overlapping sync jobs.
+    # Social sources run every three hours from the administrator's exact start time.
     scheduler.add_job(
-        scheduled_sync, 'cron', hour=','.join(map(str, social_hours)), minute=0,
-        args=[database, client, PLATFORMS], id='all-sources-3h', **common,
+        scheduled_sync, 'cron', hour=','.join(map(str, social_hours)), minute=start_minute,
+        args=[database, client, ['facebook', 'instagram', 'x', 'reddit']],
+        id='all-sources-3h', **common,
     )
-    # YouTube and Google News RSS run every 15 minutes inside the window.
-    scheduler.add_job(
-        scheduled_sync, 'cron', hour=f'{start_hour}-{end_hour - 1}', minute='15,30,45',
-        args=[database, client, ['youtube', 'news']], id='youtube-news-quarter-hour', **common,
-    )
-    if frequent_full_hours:
+    # YouTube/news retain a 15-minute cadence anchored to the exact selected
+    # start minute. Split boundary hours so the scheduler never advertises a
+    # run that the service-level window would immediately reject.
+    cadence_minutes = sorted({(start_minute + offset) % 60 for offset in range(0, 60, 15)})
+
+    def add_frequent_job(job_id, hours, minutes):
+        if not hours or not minutes:
+            return
         scheduler.add_job(
-            scheduled_sync, 'cron', hour=','.join(map(str, frequent_full_hours)), minute=0,
-            args=[database, client, ['youtube', 'news']], id='youtube-news-full-hour', **common,
+            scheduled_sync, 'cron',
+            hour=','.join(map(str, hours)), minute=','.join(map(str, minutes)),
+            args=[database, client, ['youtube', 'news']], id=job_id, **common,
+        )
+
+    if start_hour == end_hour:
+        add_frequent_job(
+            'youtube-news-window', [start_hour],
+            [minute for minute in cadence_minutes if start_minute <= minute <= end_minute],
+        )
+    else:
+        add_frequent_job(
+            'youtube-news-window-start', [start_hour],
+            [minute for minute in cadence_minutes if minute >= start_minute],
+        )
+        add_frequent_job(
+            'youtube-news-window-middle', list(range(start_hour + 1, end_hour)),
+            cadence_minutes,
+        )
+        add_frequent_job(
+            'youtube-news-window-end', [end_hour],
+            [minute for minute in cadence_minutes if minute <= end_minute],
         )
 
 
@@ -186,7 +262,10 @@ def automation_schedule():
         'enabled': True,
         'frequent': {
             'label': 'YouTube + News', 'interval_seconds': 15 * 60,
-            'next_run_at': next_time('all-sources-3h', 'youtube-news-quarter-hour', 'youtube-news-full-hour'),
+            'next_run_at': next_time(
+                'youtube-news-window', 'youtube-news-window-start',
+                'youtube-news-window-middle', 'youtube-news-window-end',
+            ),
         },
         'social': {
             'label': 'Facebook + Instagram + X + Reddit',
@@ -227,9 +306,30 @@ async def lifespan(app):
         '$setOnInsert': {
             'automation_start_hour': DEFAULT_AUTOMATION_START_HOUR,
             'automation_end_hour': DEFAULT_AUTOMATION_END_HOUR,
+            'automation_start_minute': DEFAULT_AUTOMATION_START_MINUTE,
+            'automation_end_minute': DEFAULT_AUTOMATION_END_MINUTE,
         },
         '$unset': {'email': '', 'email_enabled': '', 'webhook_enabled': '', 'webhook_secret': ''},
     }, upsert=True)
+    day_schema = await db.settings.find_one({'_id': 'main'}, {'published_day_schema_version': 1}) or {}
+    if day_schema.get('published_day_schema_version') != 1:
+        operations = []
+        async for stored in db.posts.find({}, {'published_at': 1, 'published_day': 1}):
+            published = stored.get('published_at')
+            if not published:
+                continue
+            day_value = reporting_day(published)
+            if stored.get('published_day') == day_value:
+                continue
+            operations.append(UpdateOne({'_id': stored['_id']}, {'$set': {'published_day': day_value}}))
+            if len(operations) >= 500:
+                await db.posts.bulk_write(operations, ordered=False)
+                operations = []
+        if operations:
+            await db.posts.bulk_write(operations, ordered=False)
+        await db.settings.update_one({'_id': 'main'}, {
+            '$set': {'published_day_schema_version': 1},
+        })
     watchlist_settings = await db.settings.find_one({'_id': 'main'}) or {}
     if watchlist_settings.get('active_project') not in MONITORING_PROJECTS:
         await db.settings.update_one({'_id': 'main'}, {
@@ -251,6 +351,14 @@ async def lifespan(app):
     await db.settings.update_one(
         {'_id': 'main', 'automation_end_hour': {'$exists': False}},
         {'$set': {'automation_end_hour': DEFAULT_AUTOMATION_END_HOUR}},
+    )
+    await db.settings.update_one(
+        {'_id': 'main', 'automation_start_minute': {'$exists': False}},
+        {'$set': {'automation_start_minute': DEFAULT_AUTOMATION_START_MINUTE}},
+    )
+    await db.settings.update_one(
+        {'_id': 'main', 'automation_end_minute': {'$exists': False}},
+        {'$set': {'automation_end_minute': DEFAULT_AUTOMATION_END_MINUTE}},
     )
     # Repair historical Facebook rows created when an Actor serialized its
     # author object into a string. This keeps the UI and exports readable.
@@ -351,6 +459,8 @@ async def lifespan(app):
             scheduler, db, app.state.http,
             prefs.get('automation_start_hour', DEFAULT_AUTOMATION_START_HOUR),
             prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR),
+            prefs.get('automation_start_minute', DEFAULT_AUTOMATION_START_MINUTE),
+            prefs.get('automation_end_minute', DEFAULT_AUTOMATION_END_MINUTE),
         )
         scheduler.start()
         if social_token_changed:
@@ -447,8 +557,10 @@ async def overview(platform: Platform | None = None, day: date | None = None, us
     selected = [platform] if platform in included else included if platform is None else []
     current_day = today()
     selected_day = day.isoformat() if day else current_day
-    rows = await db().daily_aggregates.find({'content_scope': YOUTUBE_CONTENT_SCOPE, 'date': {'$gte': (date.fromisoformat(current_day) - timedelta(days=29)).isoformat()},
-                                          'platform': {'$in': selected}}, {'_id': 0}).to_list(None)
+    prefs = await settings(db())
+    active_project = prefs.get('active_project', DEFAULT_MONITORING_PROJECT)
+    trend_start = (date.fromisoformat(current_day) - timedelta(days=29)).isoformat()
+    rows = await project_rollup_rows(db(), trend_start, current_day, selected, active_project)
     grouped = {}
     for r in rows:
         out = grouped.setdefault(r['date'], dict(date=r['date'], positive_count=0, negative_count=0, neutral_count=0, mixed_count=0, total_count=0))
@@ -456,24 +568,21 @@ async def overview(platform: Platform | None = None, day: date | None = None, us
             out[k] += r.get(k, 0)
     for v in grouped.values():
         v['negativity_index'] = round(v['negative_count'] / v['total_count'] * 100, 1) if v['total_count'] else 0
-    selected_summary = grouped.get(selected_day)
-    if selected_summary is None:
-        selected_rows = await db().daily_aggregates.find({
-            'content_scope': YOUTUBE_CONTENT_SCOPE,
-            'date': selected_day,
-            'platform': {'$in': selected},
-        }, {'_id': 0}).to_list(None)
-        if selected_rows:
-            selected_summary = dict(date=selected_day, positive_count=0, negative_count=0,
-                                    neutral_count=0, mixed_count=0, total_count=0)
-            for row in selected_rows:
-                for key in ['positive_count', 'negative_count', 'neutral_count', 'mixed_count', 'total_count']:
-                    selected_summary[key] += row.get(key, 0)
-            selected_summary['negativity_index'] = round(
-                selected_summary['negative_count'] / selected_summary['total_count'] * 100, 1
-            ) if selected_summary['total_count'] else 0
-    prefs = await settings(db())
-    active_project = prefs.get('active_project', DEFAULT_MONITORING_PROJECT)
+    selected_rows = [row for row in rows if row['date'] == selected_day]
+    if selected_day < trend_start or selected_day > current_day:
+        selected_rows = await project_rollup_rows(
+            db(), selected_day, selected_day, selected, active_project,
+        )
+    selected_summary = None
+    if selected_rows:
+        selected_summary = dict(date=selected_day, positive_count=0, negative_count=0,
+                                neutral_count=0, mixed_count=0, total_count=0)
+        for row in selected_rows:
+            for key in ['positive_count', 'negative_count', 'neutral_count', 'mixed_count', 'total_count']:
+                selected_summary[key] += row.get(key, 0)
+        selected_summary['negativity_index'] = round(
+            selected_summary['negative_count'] / selected_summary['total_count'] * 100, 1
+        ) if selected_summary['total_count'] else 0
     pending = await db().posts.count_documents({
         **POST_SCOPE, 'sentiment': None, 'platform': {'$in': selected},
         'demo': config().seed_mock_data,
@@ -482,12 +591,7 @@ async def overview(platform: Platform | None = None, day: date | None = None, us
     await audit(db(), user, 'view.overview', {'platform': platform})
     manual_sync_task = getattr(app.state, 'manual_sync_task', None)
     is_syncing = sync_running() or bool(manual_sync_task and not manual_sync_task.done())
-    platform_totals = [r for r in rows if r['date'] == selected_day]
-    if selected_day != current_day and not platform_totals:
-        platform_totals = await db().daily_aggregates.find({
-            'content_scope': YOUTUBE_CONTENT_SCOPE, 'date': selected_day,
-            'platform': {'$in': selected},
-        }, {'_id': 0}).to_list(None)
+    platform_totals = selected_rows
     selected_start, selected_end = bounds(selected_day)
     top_topics, top_x_voices = await conversation_insights(
         db(), selected_start, selected_end, selected, active_project,
@@ -496,12 +600,16 @@ async def overview(platform: Platform | None = None, day: date | None = None, us
         channel: {'positive_count': 0, 'negative_count': 0}
         for channel in NEWS_CHANNELS
     }
-    async for news_post in db().posts.find({
+    news_query = {
         **POST_SCOPE,
         'platform': 'news',
-        'published_at': {'$gte': selected_start, '$lt': selected_end},
+        'published_day': selected_day,
         'demo': config().seed_mock_data,
-    }, {'author': 1, 'sentiment.label': 1}):
+    }
+    project_clause = project_content_clause(active_project)
+    if project_clause:
+        news_query = {'$and': [news_query, project_clause]}
+    async for news_post in db().posts.find(news_query, {'author': 1, 'sentiment.label': 1}):
         channel = canonical_news_source(news_post.get('author'))
         label = (news_post.get('sentiment') or {}).get('label')
         if channel and label in {'positive', 'negative'}:
@@ -580,7 +688,7 @@ async def posts(q: str = Query('', max_length=200), platform: Platform | None = 
     if sentiment:
         query['sentiment.label'] = sentiment
     if day:
-        start, end = bounds(day.isoformat()); query['published_at'] = {'$gte': start, '$lt': end}
+        query['published_day'] = day.isoformat()
     rows = await db().posts.find(query).sort([('engagement_score' if sort == 'engagement' else 'published_at', -1), ('_id', -1)]).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
     await audit(db(), user, 'view.posts', {'platform': platform, 'sentiment': sentiment, 'page': page, 'page_size': page_size})
     return serialize({'items': rows, 'total': await db().posts.count_documents(query), 'page': page, 'page_size': page_size})
@@ -588,7 +696,8 @@ async def posts(q: str = Query('', max_length=200), platform: Platform | None = 
 
 @app.get('/api/voices')
 async def voices(days: int = Query(7, ge=1, le=30), user=Depends(current_user)):
-    start = now() - timedelta(days=days)
+    end_day = date.fromisoformat(today())
+    start_day = (end_day - timedelta(days=days - 1)).isoformat()
     handles = [value.casefold() for value in DEFAULT_X_USERNAMES]
     stats = {
         handle: {
@@ -601,7 +710,8 @@ async def voices(days: int = Query(7, ge=1, le=30), user=Depends(current_user)):
     }
     query = {
         **POST_SCOPE, 'platform': 'x', 'demo': config().seed_mock_data,
-        'published_at': {'$gte': start}, 'author_handle': {'$in': handles},
+        'published_day': {'$in': reporting_days(start_day, end_day.isoformat())},
+        'author_handle': {'$in': handles},
     }
     async for row in db().posts.find(query, {
         'author': 1, 'author_handle': 1, 'author_avatar_url': 1,
@@ -629,12 +739,33 @@ async def voices(days: int = Query(7, ge=1, le=30), user=Depends(current_user)):
 @app.get('/api/settings')
 async def read_settings(user=Depends(current_user)):
     prefs = await settings(db())
+    x_usernames = prefs.get('x_usernames', [])
+    handles = [str(username).strip().lstrip('@').casefold() for username in x_usernames]
+    x_profiles = {}
+    if handles:
+        async for post_row in db().posts.find({
+            'platform': 'x', 'author_handle': {'$in': handles},
+        }, {'author_handle': 1, 'author': 1, 'author_avatar_url': 1, 'published_at': 1}).sort('published_at', -1):
+            handle = str(post_row.get('author_handle') or '').casefold()
+            if handle and handle not in x_profiles:
+                x_profiles[handle] = {
+                    'author': str(post_row.get('author') or ''),
+                    'avatar_url': str(post_row.get('author_avatar_url') or ''),
+                }
+                if len(x_profiles) == len(set(handles)):
+                    break
     return serialize({'keywords': await db().tracked_keywords.find({}, {'_id': 0}).to_list(None),
                       'credentials': await db().platform_credentials.find({'platform': {'$in': PLATFORMS}}, {'encrypted_api_key': 0}).to_list(None),
                       'sources': await statuses(db()), 'model': config().hf_model, 'classifier': classifier_status(),
                       'automation_start_hour': prefs.get('automation_start_hour', DEFAULT_AUTOMATION_START_HOUR),
                       'automation_end_hour': prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR),
-                      'x_usernames': prefs.get('x_usernames', []),
+                      'automation_start_minute': prefs.get('automation_start_minute', DEFAULT_AUTOMATION_START_MINUTE),
+                      'automation_end_minute': prefs.get('automation_end_minute', DEFAULT_AUTOMATION_END_MINUTE),
+                      'x_usernames': x_usernames,
+                      'x_accounts': [{
+                          'username': username,
+                          **x_profiles.get(str(username).strip().lstrip('@').casefold(), {}),
+                      } for username in x_usernames],
                       'active_project': prefs.get('active_project', DEFAULT_MONITORING_PROJECT),
                       'monitoring_projects': [
                           {'id': project_id, 'label': project['label'], 'keywords': project['keywords']}
@@ -648,6 +779,8 @@ class Preferences(BaseModel):
     active_project: str = DEFAULT_MONITORING_PROJECT
     automation_start_hour: int = Field(ge=0, le=22)
     automation_end_hour: int = Field(ge=1, le=23)
+    automation_start_minute: int = Field(default=0, ge=0, le=59)
+    automation_end_minute: int = Field(default=0, ge=0, le=59)
 
 
 class ProjectSelection(BaseModel):
@@ -661,10 +794,6 @@ async def select_project(value: ProjectSelection, user=Depends(admin)):
     await db().settings.update_one({'_id': 'main'}, {
         '$set': {'active_project': value.active_project},
     }, upsert=True)
-    await db().platform_credentials.update_many(
-        {'platform': {'$in': PLATFORMS}},
-        {'$set': {'status': 'pending', 'error': None}},
-    )
     await audit(db(), user, 'project.select', {'active_project': value.active_project})
     return {'saved': True, 'active_project': value.active_project}
 
@@ -681,7 +810,9 @@ async def update_settings(value: Preferences, user=Depends(admin)):
         raise HTTPException(422, 'X usernames may contain only letters, numbers and underscores')
     if value.active_project not in MONITORING_PROJECTS:
         raise HTTPException(422, 'Unknown monitoring project')
-    if value.automation_start_hour >= value.automation_end_hour:
+    start_total = value.automation_start_hour * 60 + value.automation_start_minute
+    end_total = value.automation_end_hour * 60 + value.automation_end_minute
+    if start_total >= end_total:
         raise HTTPException(422, 'Automation end time must be after start time')
     for term in terms:
         await db().tracked_keywords.update_one({'keyword': term}, {'$set': {'is_active': True}}, upsert=True)
@@ -689,6 +820,8 @@ async def update_settings(value: Preferences, user=Depends(admin)):
     await db().settings.update_one({'_id': 'main'}, {'$set': {
         'automation_start_hour': value.automation_start_hour,
         'automation_end_hour': value.automation_end_hour,
+        'automation_start_minute': value.automation_start_minute,
+        'automation_end_minute': value.automation_end_minute,
         'x_usernames': x_usernames,
         'active_project': value.active_project,
     }}, upsert=True)
@@ -696,15 +829,20 @@ async def update_settings(value: Preferences, user=Depends(admin)):
         configure_automation_jobs(
             app.state.scheduler, db(), app.state.http,
             value.automation_start_hour, value.automation_end_hour,
+            value.automation_start_minute, value.automation_end_minute,
         )
     await audit(db(), user, 'settings.update', {
         'automation_start_hour': value.automation_start_hour,
         'automation_end_hour': value.automation_end_hour,
+        'automation_start_minute': value.automation_start_minute,
+        'automation_end_minute': value.automation_end_minute,
         'x_username_count': len(x_usernames),
         'active_project': value.active_project,
     })
     return {'saved': True, 'automation_start_hour': value.automation_start_hour,
-            'automation_end_hour': value.automation_end_hour}
+            'automation_end_hour': value.automation_end_hour,
+            'automation_start_minute': value.automation_start_minute,
+            'automation_end_minute': value.automation_end_minute}
 
 
 class CredentialInput(BaseModel):
@@ -821,13 +959,11 @@ async def export(period: Literal['daily', 'weekly', 'monthly'] = 'daily', format
         } for r in rows])
         content = stream.getvalue().encode('utf-8-sig'); mime = 'text/csv'
     else:
-        range_start, _ = bounds(start)
-        _, range_end = bounds(end_day)
         sentiment_match = ({'$in': ['positive', 'negative', 'neutral', 'mixed']}
                            if sentiment == 'all' else sentiment)
         sentiment_posts = await db().posts.find({
             **POST_SCOPE,
-            'published_at': {'$gte': range_start, '$lt': range_end},
+            'published_day': {'$in': reporting_days(start, end_day)},
             'platform': {'$in': included},
             'sentiment.label': sentiment_match,
             'demo': config().seed_mock_data,

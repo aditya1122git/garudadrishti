@@ -42,6 +42,7 @@ class Post(Document):
     caption: str = ''
     url: str
     published_at: datetime
+    published_day: str = ''
     engagement: Engagement = Field(default_factory=Engagement)
     engagement_score: int = 0
     ingested_at: datetime = Field(default_factory=now)
@@ -52,6 +53,7 @@ class Post(Document):
         name = 'posts'
         indexes = [IndexModel([('platform', 1), ('external_id', 1)], unique=True),
                    IndexModel([('published_at', DESCENDING)]),
+                   IndexModel([('published_day', 1), ('platform', 1)]),
                    IndexModel([('platform', 1), ('sentiment.label', 1), ('published_at', 1)]),
                    IndexModel([('telegram_notification.status', 1)]),
                    IndexModel([('content', TEXT)])]

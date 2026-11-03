@@ -100,6 +100,43 @@ REDDIT_SEARCH_GROUPS = (
      'NDA Bihar'),
 )
 
+# Provider discovery only needs the monitored entities/locations. The full
+# keyword list (including every location AND issue combination) is still used
+# below when normalizing/filtering returned posts. Sending all combinations to
+# paid Actors creates thousands of equivalent searches without adding coverage.
+SOCIAL_PROVIDER_DISCOVERY_TERMS = (
+    'Bihar', 'बिहार', 'Bihar News', 'बिहार न्यूज़',
+    'Bihar Government', 'बिहार सरकार', 'Bihar BJP', 'बिहार भाजपा',
+    'NDA Bihar', 'Samrat Choudhary', 'सम्राट चौधरी', 'Bihar CM',
+    'Bhagalpur', 'भागलपुर', 'Banka', 'बांका',
+    'Munger', 'मुंगेर', 'Gaya Bihar', 'गया', 'Nawada', 'नवादा',
+    'Aurangabad Bihar', 'औरंगाबाद', 'Jehanabad', 'जहानाबाद', 'Arwal', 'अरवल',
+    'Patna', 'पटना', 'Nalanda', 'नालंदा', 'Bhojpur', 'भोजपुर',
+    'Buxar', 'बक्सर', 'Rohtas', 'रोहतास', 'Kaimur', 'कैमूर',
+    'Muzaffarpur', 'मुजफ्फरपुर', 'Vaishali', 'वैशाली',
+    'Sitamarhi', 'सीतामढ़ी', 'Sheohar', 'शिवहर',
+    'East Champaran', 'पूर्वी चंपारण', 'Motihari', 'मोतिहारी',
+    'West Champaran', 'पश्चिमी चंपारण', 'Bettiah', 'बेतिया',
+)
+
+
+def _compact_provider_terms(keywords, project_keywords):
+    """Keep all manual terms while collapsing generated project combinations."""
+    project_scope = {
+        str(value).strip().casefold()
+        for value in project_keywords if str(value).strip()
+    }
+    manual_terms = [
+        str(value).strip() for value in keywords
+        if str(value).strip() and str(value).strip().casefold() not in project_scope
+    ]
+    unique = {}
+    for value in (*SOCIAL_PROVIDER_DISCOVERY_TERMS, *manual_terms):
+        clean = ' '.join(str(value).split())
+        if clean:
+            unique.setdefault(clean.casefold(), clean)
+    return list(unique.values())
+
 NEWS_SOURCE_ALIASES = {
     'News18': ('news18',),
     'Zee Bihar': ('zeebihar', 'zeebiharjharkhand', 'zeenews', 'zeehindustan'),
@@ -475,17 +512,17 @@ def _timestamp(value):
 def _actor_input(platform, keywords, since, max_items, x_usernames=(), project_keywords=()):
     """Build inputs for the fixed, tested Apify Actors."""
     since_iso = since.isoformat().replace('+00:00', 'Z')
+    provider_terms = _compact_provider_terms(keywords, project_keywords)
     if platform == 'instagram':
         # Direct hashtag URLs make the Instagram Scraper return post objects.
         # Its generic `search` input returns hashtag summary objects instead.
         searches = []
-        broad_keywords = _prioritized_bihar_keywords(keywords)
-        discovery_keywords = list(dict.fromkeys([
-            *broad_keywords[:4],
-            *[str(value).strip() for value in project_keywords if str(value).strip()],
-            *broad_keywords[4:],
-        ]))
-        for keyword in discovery_keywords[:10]:
+        discovery_keywords = provider_terms
+        for keyword in discovery_keywords:
+            # Boolean X/Reddit discovery expressions are not valid Instagram
+            # hashtags. Broad location/topic tags already cover both sides.
+            if re.search(r'\s+AND\s+', keyword, flags=re.I):
+                continue
             tag = re.sub(r'[^\w]+', '', keyword.lstrip('#'), flags=re.UNICODE)
             if tag and tag.casefold() not in {value.casefold() for value in searches}:
                 searches.append(tag)
@@ -522,12 +559,13 @@ def _actor_input(platform, keywords, since, max_items, x_usernames=(), project_k
             handle = re.sub(r'[^A-Za-z0-9_]', '', str(username).lstrip('@'))
             if handle:
                 search_terms.append(f'from:{handle} since:{since.date().isoformat()}')
-        project_terms = list(dict.fromkeys(
-            str(value).strip() for value in project_keywords if str(value).strip()
-        ))
-        for offset in range(0, len(project_terms), 5):
-            group = project_terms[offset:offset + 5]
-            query = ' OR '.join(f'"{term}"' for term in group)
+        for offset in range(0, len(provider_terms), 8):
+            group = provider_terms[offset:offset + 8]
+            expressions = []
+            for term in group:
+                parts = [part.strip() for part in re.split(r'\s+AND\s+', term, flags=re.I) if part.strip()]
+                expressions.append(' AND '.join(f'"{part}"' for part in parts))
+            query = ' OR '.join(f'({expression})' for expression in expressions)
             search_terms.append(f'({query}) since:{since.date().isoformat()}')
         search_terms = list(dict.fromkeys(search_terms))
         if not search_terms:
@@ -537,9 +575,11 @@ def _actor_input(platform, keywords, since, max_items, x_usernames=(), project_k
         active = {keyword.strip().casefold() for keyword in keywords if keyword.strip()}
         active_queries = [query for triggers, query in REDDIT_SEARCH_GROUPS
                           if any(trigger.casefold() in active for trigger in triggers)]
-        active_queries.extend(
-            str(value).strip() for value in list(project_keywords)[:8] if str(value).strip()
-        )
+        for offset in range(0, len(provider_terms), 6):
+            group = provider_terms[offset:offset + 6]
+            active_queries.append(' OR '.join(
+                f'"{term}"' if ' ' in term else term for term in group
+            ))
         active_queries = list(dict.fromkeys(active_queries))
         if not active_queries:
             raise ProviderError('No Reddit search terms are active')
@@ -670,10 +710,7 @@ async def apify_posts(client, platform, secret, keywords, since, x_usernames=(),
         # The official Posts Actor accepts page/profile URLs, not keywords.
         # Discover matching public pages first, then fetch their latest posts.
         discovery = await _run_apify_actor(client, APIFY_FACEBOOK_DISCOVERY_ACTOR, api_key, {
-            'categories': list(dict.fromkeys([
-                *[str(value).strip() for value in project_keywords if str(value).strip()],
-                *_prioritized_bihar_keywords(keywords),
-            ]))[:10],
+            'categories': _compact_provider_terms(keywords, project_keywords),
             # Discover relevant public pages across India. Post bodies are
             # still filtered against the tracked Bihar-focused keywords.
             'locations': ['India'],

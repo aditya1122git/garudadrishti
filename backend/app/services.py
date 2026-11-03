@@ -8,7 +8,8 @@ from html import escape as html_escape
 from zoneinfo import ZoneInfo
 from cryptography.fernet import Fernet
 from pymongo.errors import DuplicateKeyError
-from .config import config, DEFAULT_AUTOMATION_START_HOUR, DEFAULT_AUTOMATION_END_HOUR
+from .config import (config, DEFAULT_AUTOMATION_START_HOUR, DEFAULT_AUTOMATION_END_HOUR,
+                     DEFAULT_AUTOMATION_START_MINUTE, DEFAULT_AUTOMATION_END_MINUTE)
 from .models import now
 from .connectors import BIHAR_DISCOVERY_TERMS, apify_posts, google_news_posts, youtube_posts, request
 from .sentiment import classifier
@@ -162,14 +163,98 @@ MONITORING_PROJECTS = {
         ],
     },
 }
+
+
+def _unique_terms(values):
+    """Preserve display order while removing case-insensitive duplicates."""
+    unique = {}
+    for value in values:
+        clean = ' '.join(str(value or '').split())
+        if clean:
+            unique.setdefault(clean.casefold(), clean)
+    return list(unique.values())
+
+
+BHAGALPUR_BANKA_QUERY_TOPICS = [
+    ('Road', 'रोड'), ('Theft', 'चोरी'), ('Law', 'कानून'),
+    ('Security', 'सुरक्षा'), ('Police', 'पुलिस'), ('Incident', 'घटना'),
+    ('Protest', 'प्रदर्शन'), ('School', 'स्कूल'), ('Studies', 'पढ़ाई'),
+    ('Education', 'शिक्षा'), ('Teacher', 'शिक्षक'), ('Students', 'छात्र'),
+    ('DM', 'डीएम'), ('Administration', 'प्रशासन'), ('Crime', 'अपराध'),
+    ('Traffic', 'ट्रैफिक'), ('FIR', 'एफआईआर'), ('Rape', 'बलात्कार'),
+    ('Kidnapping', 'अपहरण'), ('Fraud', 'धोखाधड़ी'), ('Disease', 'बीमारी'),
+    ('Patients', 'मरीज'), ('Healthcare', 'स्वास्थ्य सेवा'),
+    ('Hospital', 'अस्पताल'), ('Doctor', 'डॉक्टर'), ('Treatment', 'इलाज'),
+    ('Medicine', 'दवा'), ('Health', 'स्वास्थ्य'), ('Justice', 'न्याय'),
+    ('Investigation', 'जांच'), ('Scam', 'घोटाला'), ('Corruption', 'भ्रष्टाचार'),
+    ('Women Safety', 'महिला सुरक्षा'), ('Cyber Crime', 'साइबर अपराध'),
+    ('Development', 'विकास'), ('Infrastructure', 'बुनियादी ढांचा'),
+    ('Flood', 'बाढ़'), ('Employment', 'रोजगार'),
+]
+
+
+def _location_issue_queries(location_en, location_hi):
+    return [
+        query
+        for topic_en, topic_hi in BHAGALPUR_BANKA_QUERY_TOPICS
+        for query in (
+            f'{location_hi} AND {topic_hi}', f'{location_hi} AND {topic_en}',
+            f'{location_en} AND {topic_hi}', f'{location_en} AND {topic_en}',
+        )
+    ]
+
+
+def _watchtower_location_queries(location_en, location_hi):
+    """Mirror the three Hindi/English query forms shown in the project captures."""
+    return [
+        query
+        for topic_en, topic_hi in BHAGALPUR_BANKA_QUERY_TOPICS[:32]
+        for query in (
+            f'{location_hi} AND {topic_hi}',
+            f'{location_hi} AND {topic_en}',
+            f'{location_en} AND {topic_en}',
+        )
+    ]
+
+
+MONITORING_PROJECTS['bhagalpur-division']['keywords'] = _unique_terms([
+    *MONITORING_PROJECTS['bhagalpur-division']['keywords'],
+    *_location_issue_queries('Bhagalpur', 'भागलपुर'),
+    *_location_issue_queries('Banka', 'बांका'),
+])
+MONITORING_PROJECTS['magadh-division']['keywords'] = _unique_terms([
+    *MONITORING_PROJECTS['magadh-division']['keywords'],
+    *_watchtower_location_queries('Gaya AND Bihar', 'गया'),
+    *_watchtower_location_queries('Nawada', 'नवादा'),
+    *_watchtower_location_queries('Aurangabad', 'औरंगाबाद'),
+    *_watchtower_location_queries('Jehanabad', 'जहानाबाद'),
+    *_watchtower_location_queries('Arwal', 'अरवल'),
+])
+MONITORING_PROJECTS['patna-division']['keywords'] = _unique_terms([
+    *MONITORING_PROJECTS['patna-division']['keywords'],
+    *_watchtower_location_queries('Patna', 'पटना'),
+    *_watchtower_location_queries('Nalanda', 'नालंदा'),
+    *_watchtower_location_queries('Bhojpur', 'भोजपुर'),
+    *_watchtower_location_queries('Buxar', 'बक्सर'),
+    *_watchtower_location_queries('Rohtas', 'रोहतास'),
+    *_watchtower_location_queries('Kaimur', 'कैमूर'),
+])
+MONITORING_PROJECTS['tirhut-division']['keywords'] = _unique_terms([
+    *MONITORING_PROJECTS['tirhut-division']['keywords'],
+    *_watchtower_location_queries('Champaran', 'चंपारण'),
+    *_watchtower_location_queries('Muzaffarpur', 'मुजफ्फरपुर'),
+    *_watchtower_location_queries('Sitamarhi', 'सीतामढ़ी'),
+    *_watchtower_location_queries('Sheohar', 'शिवहर'),
+    *_watchtower_location_queries('Vaishali', 'वैशाली'),
+])
 MONITORING_PROJECTS = {
     'all': {
         'label': 'All projects',
-        'keywords': list(dict.fromkeys(
+        'keywords': _unique_terms(
             keyword
             for project in MONITORING_PROJECTS.values()
             for keyword in project['keywords']
-        )),
+        ),
     },
     **MONITORING_PROJECTS,
 }
@@ -213,12 +298,31 @@ def bounds(day):
     return start.astimezone(timezone.utc), (start + timedelta(days=1)).astimezone(timezone.utc)
 
 
-def within_automation_window(value=None, start_hour=None, end_hour=None):
+def reporting_day(value):
+    """Return the configured local calendar day for a stored UTC timestamp."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(ZoneInfo(config().reporting_timezone)).date().isoformat()
+
+
+def reporting_days(start_day, end_day):
+    """Inclusive ISO day keys; exact string queries work across Mongo providers."""
+    start = datetime.fromisoformat(start_day).date()
+    end = datetime.fromisoformat(end_day).date()
+    return [(start + timedelta(days=offset)).isoformat()
+            for offset in range(max(0, (end - start).days) + 1)]
+
+
+def within_automation_window(value=None, start_hour=None, end_hour=None,
+                             start_minute=None, end_minute=None):
     """Return true during the inclusive operating hours."""
     local = (value or now()).astimezone(ZoneInfo(config().reporting_timezone))
     start = DEFAULT_AUTOMATION_START_HOUR if start_hour is None else start_hour
     end = DEFAULT_AUTOMATION_END_HOUR if end_hour is None else end_hour
-    return start <= local.hour <= end
+    start_m = DEFAULT_AUTOMATION_START_MINUTE if start_minute is None else start_minute
+    end_m = DEFAULT_AUTOMATION_END_MINUTE if end_minute is None else end_minute
+    current_total = local.hour * 60 + local.minute
+    return start * 60 + start_m <= current_total <= end * 60 + end_m
 
 def encrypt(value):
     return Fernet(config().encryption_key.encode()).encrypt(json.dumps(value).encode()).decode()
@@ -233,6 +337,8 @@ async def settings(db):
         'active_project': DEFAULT_MONITORING_PROJECT,
         'automation_start_hour': DEFAULT_AUTOMATION_START_HOUR,
         'automation_end_hour': DEFAULT_AUTOMATION_END_HOUR,
+        'automation_start_minute': DEFAULT_AUTOMATION_START_MINUTE,
+        'automation_end_minute': DEFAULT_AUTOMATION_END_MINUTE,
     }
 
 async def audit(db, user, action, meta=None):
@@ -259,23 +365,24 @@ async def statuses(db):
 
 async def rollup(db):
     included = analytics_platforms()
-    start = now() - timedelta(days=35)
-    match = {**POST_SCOPE, 'published_at': {'$gte': start}, 'platform': {'$in': included}, 'sentiment': {'$ne': None}, 'demo': config().seed_mock_data}
+    start_day = (datetime.fromisoformat(today()).date() - timedelta(days=35)).isoformat()
+    days = reporting_days(start_day, today())
+    match = {**POST_SCOPE, 'published_day': {'$in': days}, 'platform': {'$in': included}, 'sentiment': {'$ne': None}, 'demo': config().seed_mock_data}
     if config().demo_in_memory:
         # mongomock has no $dateTrunc. Only the explicit disposable demo uses this branch.
         grouped = defaultdict(lambda: dict(positive_count=0, negative_count=0, neutral_count=0, mixed_count=0, total_count=0))
         async for p in db.posts.find(match):
-            day = p['published_at'].astimezone(ZoneInfo(config().reporting_timezone)).date().isoformat()
+            day = p.get('published_day') or reporting_day(p['published_at'])
             g = grouped[(day, p['platform'])]
             g[p['sentiment']['label'] + '_count'] += 1; g['total_count'] += 1
         rows = [dict(date=k[0], platform=k[1], **v) for k, v in grouped.items()]
     else:
         pipeline = [{'$match': match}, {'$group': {
-            '_id': {'date': {'$dateTrunc': {'date': '$published_at', 'unit': 'day', 'timezone': config().reporting_timezone}}, 'platform': '$platform'},
+            '_id': {'date': '$published_day', 'platform': '$platform'},
             **{label + '_count': {'$sum': {'$cond': [{'$eq': ['$sentiment.label', label]}, 1, 0]}} for label in ['positive', 'negative', 'neutral', 'mixed']},
             'total_count': {'$sum': 1}}}]
         raw = await db.posts.aggregate(pipeline).to_list(None)
-        rows = [dict(date=r['_id']['date'].astimezone(ZoneInfo(config().reporting_timezone)).date().isoformat(),
+        rows = [dict(date=r['_id']['date'],
                      platform=r['_id']['platform'], **{k: v for k, v in r.items() if k != '_id'}) for r in raw]
     overall = defaultdict(lambda: dict(positive_count=0, negative_count=0, neutral_count=0, mixed_count=0, total_count=0))
     for row in rows:
@@ -291,9 +398,8 @@ async def create_alert(db, day):
     row = await db.daily_aggregates.find_one({'date': day, 'platform': 'overall'})
     if not row or row['negative_count'] <= prefs['threshold']:
         return
-    start, end = bounds(day)
     included = analytics_platforms()
-    top = await db.posts.find({**POST_SCOPE, 'published_at': {'$gte': start, '$lt': end}, 'sentiment.label': 'negative',
+    top = await db.posts.find({**POST_SCOPE, 'published_day': day, 'sentiment.label': 'negative',
                               'platform': {'$in': included}, 'demo': config().seed_mock_data}).sort('engagement_score', -1).limit(5).to_list(5)
     for p in top:
         p['_id'] = str(p['_id'])
@@ -338,18 +444,28 @@ async def notify_negative_posts(db, client):
     if (c.seed_mock_data or not c.telegram_bot_token or not recipients
             or not within_automation_window(
                 start_hour=prefs.get('automation_start_hour', DEFAULT_AUTOMATION_START_HOUR),
-                end_hour=prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR))):
+                end_hour=prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR),
+                start_minute=prefs.get('automation_start_minute', DEFAULT_AUTOMATION_START_MINUTE),
+                end_minute=prefs.get('automation_end_minute', DEFAULT_AUTOMATION_END_MINUTE))):
         return
-    start, end = bounds(today())
-    await db.posts.update_many({
-        'telegram_notification.status': {'$in': ['pending', 'failed']},
-        '$or': [{'published_at': {'$lt': start}}, {'published_at': {'$gte': end}}],
-    }, {'$set': {'telegram_notification.status': 'skipped',
-                 'telegram_notification.error': 'Only posts published today are alerted'}})
+    # Keep legacy rows (created before ``published_day`` was introduced)
+    # eligible by deriving their reporting day from ``published_at`` below.
+    # Filtering on a BSON datetime range is deliberately avoided because the
+    # production Mongo-compatible provider does not evaluate those ranges
+    # consistently.
     query = {'sentiment.label': 'negative', 'demo': False,
-             'published_at': {'$gte': start, '$lt': end},
              'telegram_notification.status': {'$in': ['pending', 'failed']}}
     async for post_row in db.posts.find(query).sort('published_at', 1).limit(100):
+        published = post_row.get('published_at')
+        post_day = post_row.get('published_day') or (
+            reporting_day(published) if published else ''
+        )
+        if post_day != today():
+            await db.posts.update_one({'_id': post_row['_id']}, {'$set': {
+                'telegram_notification.status': 'skipped',
+                'telegram_notification.error': 'Only posts published today are alerted',
+            }})
+            continue
         claim = await db.posts.update_one({
             '_id': post_row['_id'],
             'telegram_notification.status': {'$in': ['pending', 'failed']},
@@ -425,7 +541,9 @@ async def scheduled_sync(db, client, platforms):
     prefs = await settings(db)
     if not within_automation_window(
             start_hour=prefs.get('automation_start_hour', DEFAULT_AUTOMATION_START_HOUR),
-            end_hour=prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR)):
+            end_hour=prefs.get('automation_end_hour', DEFAULT_AUTOMATION_END_HOUR),
+            start_minute=prefs.get('automation_start_minute', DEFAULT_AUTOMATION_START_MINUTE),
+            end_minute=prefs.get('automation_end_minute', DEFAULT_AUTOMATION_END_MINUTE)):
         return
     await sync(db, client, platforms=platforms)
 
@@ -439,8 +557,10 @@ async def sync(db, client, platforms=None):
             selected = [p for p in (platforms or enabled) if p in enabled]
             preferences = await settings(db)
             base_keywords = [k['keyword'] async for k in db.tracked_keywords.find({'is_active': True})]
-            active_project = preferences.get('active_project', DEFAULT_MONITORING_PROJECT)
-            project_keywords = MONITORING_PROJECTS.get(active_project, {}).get('keywords', [])
+            # Ingestion is deliberately independent from the UI project filter.
+            # Every run monitors all seven projects plus the editable manual terms;
+            # active_project only controls which stored posts the API displays.
+            project_keywords = MONITORING_PROJECTS['all']['keywords']
             keywords = list(dict.fromkeys([*base_keywords, *project_keywords]))
             x_usernames = preferences.get('x_usernames', [])
             if keywords:
@@ -450,8 +570,7 @@ async def sync(db, client, platforms=None):
                     await db.platform_credentials.update_one({'_id': c['_id']}, {'$set': {'last_attempt_at': started}})
                     try:
                         secret = decrypt(c['encrypted_api_key'])
-                        scope_changed = (c.get('tracking_scope_version') != TRACKING_SCOPE_VERSION
-                                         or c.get('monitoring_project') != active_project)
+                        scope_changed = c.get('tracking_scope_version') != TRACKING_SCOPE_VERSION
                         if scope_changed:
                             # A campaign retarget must not reuse the previous campaign's
                             # ingestion cursor. Backfill all sources for the new scope.
@@ -474,6 +593,7 @@ async def sync(db, client, platforms=None):
                                 client, p, secret, keywords, since, x_usernames, project_keywords,
                             )
                         for row in rows:
+                            row['published_day'] = reporting_day(row['published_at'])
                             if p == 'youtube':
                                 # Upgrade legacy title-only rows to title + description
                                 # and send them through classification once.
@@ -500,7 +620,7 @@ async def sync(db, client, platforms=None):
                             )
                         credential_update = {'last_synced_at': started, 'status': 'live', 'error': None,
                                              'tracking_scope_version': TRACKING_SCOPE_VERSION,
-                                             'monitoring_project': active_project,
+                                             'monitoring_project': 'all',
                                              'encrypted_api_key': encrypt(secret)}
                         if p == 'youtube':
                             credential_update['search_strategy'] = YOUTUBE_SEARCH_STRATEGY
@@ -612,7 +732,7 @@ async def seed(db):
                 available_seconds = max(1, int((min(end, now()) - start).total_seconds()))
                 docs.append(dict(schema_version=1, platform=platform, external_id=f'demo-{day}-{platform}-{i}',
                                  author=f'Sample analyst {i % 80 + 1:02d}', content=rng.choice(texts[label]), url='',
-                                 published_at=start + timedelta(seconds=rng.randrange(available_seconds)), engagement=eng,
+                                 published_at=start + timedelta(seconds=rng.randrange(available_seconds)), published_day=day, engagement=eng,
                                  engagement_score=eng['likes'] + eng['comments'] + eng['shares'], ingested_at=now(), demo=True,
                                  sentiment=dict(label=label, confidence=round(rng.uniform(.59, .98), 2), reason='Synthetic demonstration label', model_used='demo-fixture', classified_at=now())))
     await db.posts.insert_many(docs)
